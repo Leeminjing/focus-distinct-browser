@@ -8,7 +8,7 @@
 #include "../control.h"
 
 namespace distinct {
-enum class ShellCommand { takeover, address_focus, navigate, back, forward, reload_stop, reload, focus_page };
+enum class ShellCommand { takeover, address_focus, navigate, back, forward, reload_stop, reload, focus_page, focus_page_next, focus_page_previous };
 struct ShellState {
     Mode mode = Mode::available;
     bool ready = false, connected = true, busy = false, loading = true;
@@ -33,6 +33,7 @@ public:
     void set_url(const std::wstring& url);
     std::wstring input_url() const;
     void focus_address();
+    void focus_from_page(bool previous);
     void theme_changed();
     bool shortcut(UINT key, bool ctrl, bool alt);
     bool pre_translate(const MSG& message);

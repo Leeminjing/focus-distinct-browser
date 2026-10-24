@@ -10,6 +10,16 @@ gdi32 = ctypes.WinDLL("gdi32", use_last_error=True)
 user32.SetThreadDpiAwarenessContext.argtypes = [ctypes.c_void_p]
 user32.SetThreadDpiAwarenessContext.restype = ctypes.c_void_p
 user32.SetThreadDpiAwarenessContext(ctypes.c_void_p(-4))
+
+
+class GuiThreadInfo(ctypes.Structure):
+    _fields_ = [("size", W.DWORD), ("flags", W.DWORD)] + [
+        (name, W.HWND) for name in ("active", "focus", "capture", "menu", "move", "caret")
+    ] + [("rect", W.RECT)]
+
+
+user32.GetWindowThreadProcessId.argtypes = [W.HWND, ctypes.POINTER(W.DWORD)]
+user32.GetGUIThreadInfo.argtypes = [W.DWORD, ctypes.POINTER(GuiThreadInfo)]
 for name, args, result in [
     ("GetDlgItem", [W.HWND, ctypes.c_int], W.HWND),
     ("SendMessageW", [W.HWND, W.UINT, W.WPARAM, W.LPARAM], ctypes.c_ssize_t),
@@ -61,6 +71,13 @@ def rectangle(hwnd):
     value = W.RECT()
     assert user32.GetWindowRect(hwnd, ctypes.byref(value))
     return value.left, value.top, value.right, value.bottom
+
+
+def focused_window(hwnd):
+    info = GuiThreadInfo(); info.size = ctypes.sizeof(info)
+    thread = user32.GetWindowThreadProcessId(hwnd, None)
+    assert user32.GetGUIThreadInfo(thread, ctypes.byref(info))
+    return info.focus
 
 
 def snapshot(hwnd, path):

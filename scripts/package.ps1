@@ -1,6 +1,6 @@
 param(
     [string]$Executable = 'build/distinct-browser.exe',
-    [string]$Version = '0.2.1'
+    [string]$Version = '0.3.0'
 )
 $ErrorActionPreference = 'Stop'
 $projectRoot = Split-Path $PSScriptRoot -Parent
@@ -26,7 +26,7 @@ try {
         sha256 = $hash
         source_commit = $commit
         protocol_version = 1
-        required_runtime = 'Microsoft Edge WebView2 Evergreen Runtime'
+        required_runtime = 'Microsoft Edge WebView2 Evergreen Runtime (138+; host input processing required)'
     }
     $json = $metadata | ConvertTo-Json
     [System.IO.File]::WriteAllText((Join-Path $destination 'artifact.json'), "$json`n", [System.Text.UTF8Encoding]::new($false))

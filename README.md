@@ -1,14 +1,16 @@
-# Distinct Browser · v0.2 Native Browser Shell
+# Distinct Browser · v0.3 Human–Agent Collaboration
 
 一个 Windows 11 x64 原生浏览器宿主：C++17、Win32 窗口、系统 WebView2 Runtime。每个浏览器有真实窗口、独立数据目录和控制权状态。一个进程可以代表多个逻辑调用者，通过重定向的 stdin/stdout 发送 UTF-8 JSON 行。
 
-交付文件是 `build/distinct-browser.exe`。静态链接 WebView2 Loader 和 MSVC CRT，无需旁带 Loader DLL、VC++ Redistributable 或 .NET；机器仍须安装 WebView2 Evergreen Runtime。SDK 是构建依赖，Python 只用于演示和验收。
+交付文件是 `build/distinct-browser.exe`。静态链接 WebView2 Loader 和 MSVC CRT，无需旁带 Loader DLL、VC++ Redistributable 或 .NET；机器仍须安装支持宿主输入处理的 WebView2 Evergreen Runtime（138 或更高版本，创建时检查接口能力）。SDK 是构建依赖，Python 只用于演示和验收。
 
 v0.2 使用 Direct2D / DirectWrite 绘制单行 64 DIP 原生工具栏，保留 Windows 原生地址编辑框。支持返回、前进、刷新 / 停止、地址输入、明暗主题与 DPI 缩放，控制状态和接管入口始终可见。页面、窗口和登录数据不会因为工具栏操作而重建，JSONL 协议仍为 v1。
 
 ![v0.2 真实窗口中的 WebView2 测试页](docs/images/v0.2-shell.png)
 
-实现范围、键盘操作和验证限制见 [v0.2 交付说明](docs/v0.2.md)。
+v0.3 在原有外壳上增加原生输入仲裁：用户直接点击、输入、滚动或拖动网页时，先撤销该页自动令牌，再把同一次输入交给 WebView2；悬停、焦点变化和展示窗口不接管。已派发操作保留真实收尾，交还后取得新租约并重新观察。沿用 JSONL v1，`control_changed.detail.reason` 增加 `human_input`。
+
+实现范围及消息测试、桌面测试与人工验收的区别见 [v0.3 说明](docs/v0.3.md)；原生外壳说明保留在 [v0.2](docs/v0.2.md)。当前 v0.3 是桌面验收待完成的预发布版。
 
 ## 运行演示
 
@@ -17,6 +19,8 @@ python demo/demo.py
 ```
 
 演示在本地启动测试页面，打开 A、B 两个窗口，并行输入和点击；第二个调用者随后接管 A 的同一页面。窗口保持打开，可以体验原生“接管 / 交还”、地址栏导航、最小化和恢复。终端按 Enter 关闭演示窗口。
+
+人机协作演示：`python demo/collaborate.py`。两个调用者持续操作各自的计数器；直接操作 A 后 A 停止、B 继续，点击“交还”后 A 用新租约观察再继续。`--typing` 模式让输入框保持焦点，便于手工验证键盘和 IME 介入。演示不注入系统键鼠。
 
 EXE 通过管道启动，不分配控制台。双击 EXE 不会启动演示；其他语言的调用方可以直接启动 EXE 并连接管道，不需要 Python。
 
@@ -45,6 +49,7 @@ ctest --test-dir build/cmake -C Release --output-on-failure
 python tests/integration.py
 python tests/navigation.py
 python tests/shell.py
+python tests/collaboration.py
 python tests/toolbar_component.py
 python tests/protocol.py
 python tests/failures.py
@@ -61,13 +66,16 @@ python tests/failures.py
 - 同文档锚点跳转、重复锚点、移除锚点、HTTP 重定向、页面取消和后续导航取代时的准确收尾。
 - Runtime 缺失、用户数据目录被配置覆盖、测试专属 WebView2 进程故障、操作超时。
 - 原生工具栏导航、Cookie / localStorage 保留、旧令牌失效、在途操作收尾、加载反馈、窗口缩放、中文选择编辑、IME 确认键保护及快捷键处理路径。
+- 33 组输入意图分类、真实 WebView2 原生队列的首次点击 / 按键 / 滚轮 / 拖动 / Unicode、Tab 边界、CDP 不误接管、双浏览器互不影响，以及在途 CDP 按下后阻止未派发抬起的交错检查。
 - 明暗配色、96 / 144 DPI 组件几何和原生窗口截图。主题测试使用测试进程独立的注册表映射，不改用户的系统主题。
 
 `failures.py` 的超时检查约需 20 秒，并会终止它自己创建的 WebView2 测试进程。截图和验收摘要写入 `artifacts/`。
 
+以上协作自动检查向测试自己的原生 HWND 投递消息，不能代替物理设备和实际 IME 候选窗。桌面空闲时可单独运行 `python tests/desktop_input.py --run`，它会移动鼠标并向测试窗口注入系统输入；不要与其他桌面自动化并行。本轮按用户要求延后该套桌面验收，详见 [待验收清单](docs/v0.3.md#待补的桌面与人工验收)。
+
 ## 使用边界
 
-每个窗口只有一个页面；额外弹窗会被阻止并报告。自动操作仅提供导航、坐标点击、文字、有限命名按键和滚动，不开放任意脚本或通用 CDP 调用。进入地址栏或使用工具栏导航会撤销自动令牌；直接点击或输入网页内容的自动接管留待 v0.3，当前仍可用工具栏按钮交接。
+每个窗口只有一个页面；额外弹窗会被阻止并报告。自动操作仅提供导航、坐标点击、文字、有限命名按键和滚动，不开放任意脚本或通用 CDP 调用。网页原生输入、进入地址栏及工具栏导航都会撤销自动令牌；仍可使用“接管 / 交还”按钮。这里的人工输入来自 Windows 原生消息，不是基于页面事件或 `isTrusted` 猜测来源。
 
 同一浏览器只接受一个在途操作；并发请求收到 `busy`，不积压动作，也不自动重试。不同浏览器可以各自等待异步结果。操作已处理不代表网页业务成功，调用者需要观察结果。
 
@@ -77,4 +85,4 @@ python tests/failures.py
 
 完整接口见 [协议](docs/protocol.md)，实现边界见 [设计](docs/design.md)。
 
-源码提交后可用 `./scripts/package.ps1` 打包单 EXE、`SHA256SUMS.txt` 和 `artifact.json`（含源码提交及协议版本），输出到 `artifacts/releases/v0.2.1/`。不要分发测试用的 `toolbar-component.exe`。
+源码提交后可用 `./scripts/package.ps1` 打包单 EXE、`SHA256SUMS.txt` 和 `artifact.json`（含源码提交及协议版本），输出到 `artifacts/releases/v0.3.0/`。不要分发测试用的 `toolbar-component.exe`。

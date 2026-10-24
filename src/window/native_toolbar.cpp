@@ -186,6 +186,12 @@ std::wstring NativeToolbar::input_url() const {
 void NativeToolbar::focus_address() {
     SetFocus(address_); SendMessage(address_, EM_SETSEL, 0, -1);
 }
+void NativeToolbar::focus_from_page(bool previous) {
+    HWND order[] = {back_, forward_, reload_, address_, takeover_};
+    for (int index = previous ? 4 : 0; index >= 0 && index < 5; index += previous ? -1 : 1) {
+        if (IsWindowEnabled(order[index])) { SetFocus(order[index]); return; }
+    }
+}
 bool NativeToolbar::shortcut(UINT key, bool ctrl, bool alt) {
     if ((ctrl && key == 'L') || (alt && key == 'D')) { focus_address(); return true; }
     if ((ctrl && key == 'R') || key == VK_F5) { callback_(ShellCommand::reload); return true; }
@@ -215,7 +221,7 @@ bool NativeToolbar::pre_translate(const MSG& message) {
                 for (int next = index + step; next >= 0 && next < 5; next += step) {
                     if (IsWindowEnabled(order[next])) { SetFocus(order[next]); return true; }
                 }
-                callback_(ShellCommand::focus_page); return true;
+                callback_(step > 0 ? ShellCommand::focus_page_next : ShellCommand::focus_page_previous); return true;
             }
         }
     }

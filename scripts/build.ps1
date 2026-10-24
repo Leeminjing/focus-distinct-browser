@@ -62,6 +62,10 @@ try {
         if ($LASTEXITCODE) { throw 'Address test compilation failed' }
         & ./build/address-tests.exe
         if ($LASTEXITCODE) { throw 'Address tests failed' }
+        & cl.exe /nologo /std:c++17 /O2 /MT /EHsc /W4 /utf-8 /DNOMINMAX /DWIN32_LEAN_AND_MEAN /Fobuild/ /Febuild/page-input-tests.exe tests/page_input_tests.cpp
+        if ($LASTEXITCODE) { throw 'Page input test compilation failed' }
+        & ./build/page-input-tests.exe
+        if ($LASTEXITCODE) { throw 'Page input tests failed' }
         & cl.exe /nologo /std:c++17 /O2 /MT /EHsc /W4 /utf-8 /DUNICODE /D_UNICODE /DNOMINMAX /DWIN32_LEAN_AND_MEAN /Fobuild/ /Febuild/toolbar-component.exe tests/toolbar_component.cpp src/window/native_toolbar.cpp build/app.res /link /SUBSYSTEM:WINDOWS user32.lib gdi32.lib ole32.lib d2d1.lib dwrite.lib dwmapi.lib comctl32.lib advapi32.lib
         if ($LASTEXITCODE) { throw 'Toolbar component test compilation failed' }
     }

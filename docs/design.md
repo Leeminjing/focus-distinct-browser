@@ -1,10 +1,10 @@
-# 实现设计 · v0.2
+# 实现设计 · v0.3
 
 宿主只认识浏览器、调用者、租约、窗口和网页，不包含上层应用的业务生命周期或对象映射。
 
 ## 执行结构
 
-`src/main.cpp` 保留进程、浏览器集合、WebView2 事件与协议处理；`src/window/native_toolbar.*` 独立负责原生工具栏、布局、主题、DPI、键盘、原生编辑控件与绘制；`src/host/pipe_output.h` 封装有界异步输出。`src/control.h` 是不依赖 Windows API 的控制权状态机；`src/json.h` 包装系统 `Windows.Data.Json`。本轮只抽取新增 UI 和现有输出职责，不整体搬迁浏览器或协议。JSON 投影来自 Windows SDK 的 C++/WinRT，不增加分发组件。
+`src/main.cpp` 保留进程、浏览器集合、WebView2 事件与协议处理；`src/window/native_toolbar.*` 独立负责原生工具栏、布局、主题、DPI、键盘、原生编辑控件与绘制；`src/window/page_input.h` 分类原生输入意图；`src/host/pipe_output.h` 封装有界异步输出。`src/control.h` 是不依赖 Windows API 的控制权状态机；`src/json.h` 包装系统 `Windows.Data.Json`。JSON 投影来自 Windows SDK 的 C++/WinRT，不增加分发组件。
 
 一个 STA UI 线程持有所有 HWND、WebView2 COM 对象和控制状态。管道读取线程按行读取数据，投递至 message-only window；UI 线程解析并处理请求。输入消息队列最多 128 条，单行最多 1 MiB。独立输出线程写 stdout，防止管道反压阻塞原生窗口；队列超过 64 MiB 时撤销连接。
 
@@ -18,7 +18,11 @@ WebView2 的创建、截图和 CDP 操作均使用异步回调。A 等待结果�
 
 所有原生导航操作都经过宿主控制权状态机：先撤销自动令牌，再执行或等待已经派发的操作收尾。地址编辑开始时也撤销令牌，后续 URL 事件不会覆盖正在输入的文字。必要时停止在途自动导航，保留其真实失败结果，再执行用户最后一次提交的原生导航。这里的等待只用于用户已经发出的导航意图，不缓存或恢复自动动作。
 
-浏览历史委托给 WebView2 的 GoBack / GoForward / Reload / Stop 和历史属性。网页获得焦点时的快捷键通过 Controller 的 AcceleratorKeyPressed 识别，立即标记已处理，再投递到 UI 消息循环，避免在同步输入回调里切换焦点或导航。地址编辑不拦截文本选择、粘贴或 IME 组合消息；组合输入期间的 Enter / Esc 交给原生控件。
+浏览历史委托给 WebView2 的 GoBack / GoForward / Reload / Stop 和历史属性。网页和工具栏快捷键统一经过宿主消息循环；启用宿主输入处理后，不再依赖变为异步的 AcceleratorKeyPressed。Tab 进出页面使用 Controller 的 MoveFocus / MoveFocusRequested，离开页面时延后到窗口消息再聚焦原生控件。地址编辑不拦截文本选择、粘贴或 IME 组合消息；组合输入期间的 Enter / Esc 交给原生控件。
+
+网页放在独立的原生子 HWND 中，Controller 的 Bounds 使用该容器的客户坐标；顶层工具栏仍占 64 DIP。Environment10 创建 ControllerOptions，Options4 启用 AllowHostInputProcessing，再以 CreateCoreWebView2ControllerWithOptions 创建 Controller。缺少接口或设置失败会关闭未就绪窗口、返回创建失败，不回退到只有按钮接管的实例。
+
+消息循环先匹配顶层窗口，再检查目标是否属于该页 HWND 子树。遇到鼠标按下、滚轮、按键 / 字符、IME 组合、接触中的指针 / 触摸或拖动，自动 / 可申请状态立即经现有 revoke 转为人工 / 接管中，并输出 reason=human_input；然后照常 TranslateMessage / DispatchMessage，保留首次输入。悬停、单独修饰键、Alt+Tab、激活和展示不算操作。人工 / 接管中不重复撤销或发事件；暂停、关闭、故障保持原有边界。CDP 直接进入网页运行时，不进入该宿主输入路径。没有全局输入钩子或生产网页脚本监听器。
 
 ## 创建与隔离
 
@@ -32,7 +36,7 @@ WebView2 的创建、截图和 CDP 操作均使用异步回调。A 等待结果�
 
 控制令牌覆盖“取得控制 → 观察 → 一段动作 → 释放”。租约采用单调时钟；定时器和每次实际派发前都检查到期。接管、最小化、隐藏、关闭、故障和断连都清除令牌与观察资格。
 
-用户点击“接管”后立即阻止后续派发；有已发操作时显示“接管中”，回调收尾后转“人工控制”。最后一个已发步骤的真实成功仍可以返回；多步动作中尚未发送的步骤会被拒绝。交还只开放新租约，旧操作不会恢复。
+用户点击“接管”或直接操作网页后立即阻止后续派发；有已发操作时显示“接管中”，回调收尾后转“人工控制”。最后一个已发步骤的真实成功仍可以返回；多步动作中尚未发送的步骤会被拒绝。交还只开放新租约、将焦点放回原页面，旧操作不会恢复。网页输入不会替用户停止已发导航，也不能撤回网络或页面副作用。
 
 CDP 输入直接发往指定 WebView2，不调用桌面 `SendInput`。多步 CDP 等前一回调再派发下一步。导航通过 WebView2 API：跨文档请求按自己的导航 ID 结算，与浏览器最新文档的加载状态分开处理；同文档请求根据 `SourceChanged` / `HistoryChanged` 和规范化目标 URL 结算。HTTP 重定向沿用同一 ID；不同 ID 的新导航使旧请求以 `navigation_superseded` 结束，旧完成事件不能清除新页面的加载标志。取消和正常失败保留 Runtime 原始状态并结算，不升级成宿主故障。导航或视口变化会使旧观察失效，防止继续使用明显过时的坐标。
 
@@ -48,7 +52,7 @@ CDP 输入直接发往指定 WebView2，不调用桌面 `SendInput`。多步 CDP
 
 ## 验证范围与尚未支持
 
-状态机、真实 WebView2 集成、原生外壳、明暗配色、96 / 144 DPI 组件、管道异常和故障检查均有可执行测试，并保留真实原生窗口截图。物理组合键在本机受到 Windows 前台激活策略限制，测试验证原生消息循环和 Controller 的延迟快捷键处理路径；跨显示器实际 DPI 迁移、真人 IME 候选窗以及系统策略组合仍需人工补验。v0.2 不做网页输入自动接管、多标签页、元素定位、下载管理、进程重启恢复或自动故障恢复。
+状态机、真实 WebView2 集成、原生外壳、明暗配色、96 / 144 DPI 组件、管道异常和故障检查均有可执行测试。v0.3 增加原生消息输入与在途 CDP 子步骤交错验证。系统输入注入套件单独运行，物理按键、IME 候选窗、跨显示器 DPI、实际触摸 / 笔与跨边界拖动仍需人工验收。本轮用户确认同机有其他桌面自动化，要求延后桌面验收，因此预发布不等于完整设备验收通过。详细记录见 [v0.3](v0.3.md)。多标签页、下载和资源池优化属于后续版本。
 
 ## 微软参考
 
@@ -60,3 +64,4 @@ CDP 输入直接发往指定 WebView2，不调用桌面 `SendInput`。多步 CDP
 - [ReleaseChannels](https://learn.microsoft.com/en-us/microsoft-edge/webview2/reference/win32/icorewebview2environmentoptions7)：选择稳定 Runtime。
 - [进程模型](https://learn.microsoft.com/en-us/microsoft-edge/webview2/concepts/process-model)：独立用户数据目录和运行时进程组。
 - [前台激活](https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-setforegroundwindow)：展示窗口与前台激活结果分别报告。
+- [宿主输入处理](https://learn.microsoft.com/en-us/microsoft-edge/webview2/reference/win32/icorewebview2controlleroptions4)与[Controller 创建选项](https://learn.microsoft.com/en-us/microsoft-edge/webview2/reference/win32/icorewebview2environment10)：沿用窗口化 Controller 的原生输入路径。

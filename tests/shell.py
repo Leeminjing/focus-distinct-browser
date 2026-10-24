@@ -9,7 +9,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "demo"))
 from client import Client, BrowserError
 from fixture import Fixture
-from native_ui import user32, click, rectangle, text, set_text, snapshot
+from native_ui import user32, click, rectangle, text, set_text, snapshot, focused_window
 
 
 def wait_until(predicate, description):
@@ -131,27 +131,16 @@ def run():
         page.wait(lambda r: r["name"] == "IME")
         print("PASS native Unicode selection, Escape and IME confirmation guard", flush=True)
 
-        # Exercise the deferred route used by WebView2's AcceleratorKeyPressed.
-        # This needs no global keyboard injection or foreground-policy bypass.
-        user32.SendMessageW(hwnd, 0x8000 + 3, ord("L"), 1)
-        selection = user32.SendMessageW(address, 0x00B0, 0, 0)  # EM_GETSEL
-        assert selection & 0xFFFF == 0 and selection >> 16 == len(text(address))
+        # F5 now takes the common host message route. Actual modifier-key
+        # combinations are covered separately by opt-in desktop_input.py.
+        user32.PostMessageW(user32.GetDlgItem(hwnd, 106), 0x0100, 9, 0)  # Tab from reload into EDIT.
+        wait_until(lambda: focused_window(hwnd) == address, "Native Tab did not focus address")
         set_text(address, "unsubmitted.invalid")
-        loads = sum(r["name"] == "IME" and r["event"] == "loaded" for r in page.records)
-        user32.SendMessageW(hwnd, 0x8000 + 3, ord("R"), 1)
-        wait_until(lambda: sum(r["name"] == "IME" and r["event"] == "loaded" for r in page.records) > loads,
-                   "Ctrl+R accelerator route did not refresh")
-        assert text(address) == page.url("IME"), "An unsubmitted draft must not hide the real URL after blur"
-        user32.SendMessageW(hwnd, 0x8000 + 3, 0x25, 2)  # Alt+Left
-        wait_until(lambda: text(address) == page.url("Manual"), "Alt+Left accelerator route did not navigate back")
-        user32.SendMessageW(hwnd, 0x8000 + 3, 0x27, 2)  # Alt+Right
-        wait_until(lambda: text(address) == page.url("IME"), "Alt+Right accelerator route did not navigate forward")
-        print("PASS address selection and Ctrl+R / Alt+Left / Alt+Right accelerator routes", flush=True)
-
         loads = sum(r["name"] == "IME" and r["event"] == "loaded" for r in page.records)
         user32.PostMessageW(hwnd, 0x0100, 0x74, 0)  # F5 through the actual message loop.
         wait_until(lambda: sum(r["name"] == "IME" and r["event"] == "loaded" for r in page.records) > loads,
                    "F5 did not refresh")
+        assert text(address) == page.url("IME"), "An unsubmitted draft must not hide the actual URL after blur"
         print("PASS F5 shortcut through the native message loop", flush=True)
 
         # A port separator is not a URI scheme. Localhost is case insensitive;

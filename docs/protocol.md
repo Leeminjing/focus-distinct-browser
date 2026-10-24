@@ -99,6 +99,8 @@
 
 事件包括 `created`、`control_changed`、`paused`、`closed`、`faulted`、`navigation_completed`、`popup_blocked`。`detail` 可含原因、导航成功标志或被阻止的 URL；未规定的字段应忽略。通用 `protocol_error` 没有浏览器标识。
 
+v0.3 的网页原生输入接管沿用 `control_changed`，首次输入的 `detail.reason` 为 `human_input`。没有在途操作时状态为 `manual`，否则先发 `taking_over`，已派发操作收尾后转 `manual`。悬停、展示和 CDP 输入不产生该原因。重复人工输入不重复撤销；用户交还后仍需新租约和新观察。输入并不撤回已经派发的命令或保证其页面副作用取消。
+
 EOF、stdout 写失败或输出队列超过 64 MiB 都视为断连：统一撤销自动控制，保留已完成初始化的窗口，供用户人工操作；初始化中的窗口关闭。断连后不重新连接；最后一个窗口关闭后退出进程。正常连接期间，即使所有窗口已关闭，宿主仍可继续处理创建请求。
 
 ## 常见错误码

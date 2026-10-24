@@ -12,6 +12,7 @@
 #include "control.h"
 #include "window/native_toolbar.h"
 #include "window/address_input.h"
+#include "window/page_input.h"
 #include "host/pipe_output.h"
 #include <atomic>
 #include <filesystem>
@@ -32,7 +33,8 @@ using Microsoft::WRL::ComPtr;
 using namespace distinct;
 namespace fs = std::filesystem;
 constexpr UINT input_message = WM_APP + 1, disconnected_message = WM_APP + 2;
-constexpr UINT shortcut_message = WM_APP + 3, manual_navigation_message = WM_APP + 4;
+constexpr UINT manual_navigation_message = WM_APP + 4, focus_toolbar_message = WM_APP + 5;
+constexpr int page_host_id = 108;
 constexpr uint64_t operation_timeout = 20000, create_timeout = 45000;
 static uint64_t now() { return GetTickCount64(); }
 static std::string guid() {
@@ -64,7 +66,7 @@ struct Browser : std::enable_shared_from_this<Browser> {
     std::string id, label, creation;
     uint64_t created = now(), revision = 0, navigation_id = 0;
     fs::path profile;
-    HWND window = nullptr;
+    HWND window = nullptr, page_window = nullptr;
     std::unique_ptr<NativeToolbar> toolbar;
     std::optional<ShellCommand> pending_manual;
     std::wstring pending_address, notice;
@@ -78,6 +80,7 @@ struct Browser : std::enable_shared_from_this<Browser> {
     void layout();
     void refresh();
     void user_command(ShellCommand command);
+    void human_input();
     void drain_manual();
 };
 struct Host {
@@ -205,7 +208,9 @@ void Browser::layout() {
     if (toolbar) toolbar->layout();
     if (controller) {
         int height = toolbar ? toolbar->height_pixels() : MulDiv(NativeToolbar::height_dip, static_cast<int>(GetDpiForWindow(window)), 96);
-        bounds.top = std::min(bounds.bottom, static_cast<LONG>(height));
+        height = std::min(bounds.bottom, static_cast<LONG>(height));
+        SetWindowPos(page_window, nullptr, 0, height, bounds.right, bounds.bottom - height, SWP_NOZORDER | SWP_NOACTIVATE);
+        bounds.bottom -= height;
         controller->put_Bounds(bounds);
         controller->put_IsVisible(IsWindowVisible(window) && !IsIconic(window));
     }
@@ -222,6 +227,11 @@ void Browser::refresh() {
     }
     toolbar->update(state);
 }
+void Browser::human_input() {
+    if (closing || !ready || (control.mode != Mode::automatic && control.mode != Mode::available)) return;
+    notice.clear();
+    host->revoke(shared_from_this(), Mode::manual, "human_input");
+}
 void Browser::user_command(ShellCommand command) {
     if (closing || !ready || control.mode == Mode::faulted) return;
     auto self = shared_from_this();
@@ -229,13 +239,16 @@ void Browser::user_command(ShellCommand command) {
         if (control.mode == Mode::manual || control.mode == Mode::paused) {
             if (host->connected && IsWindowVisible(window) && !IsIconic(window) && control.hand_back().empty()) {
                 notice.clear(); refresh(); host->event(self, "control_changed", object({{L"reason", js("hand_back")}}));
+                controller->MoveFocus(COREWEBVIEW2_MOVE_FOCUS_REASON_PROGRAMMATIC);
             }
         } else if (control.mode == Mode::automatic || control.mode == Mode::available)
             host->revoke(self, Mode::manual, "takeover");
         return;
     }
-    if (command == ShellCommand::focus_page) {
-        controller->MoveFocus(COREWEBVIEW2_MOVE_FOCUS_REASON_PROGRAMMATIC); return;
+    if (command == ShellCommand::focus_page || command == ShellCommand::focus_page_next || command == ShellCommand::focus_page_previous) {
+        controller->MoveFocus(command == ShellCommand::focus_page_next ? COREWEBVIEW2_MOVE_FOCUS_REASON_NEXT :
+            command == ShellCommand::focus_page_previous ? COREWEBVIEW2_MOVE_FOCUS_REASON_PREVIOUS : COREWEBVIEW2_MOVE_FOCUS_REASON_PROGRAMMATIC);
+        return;
     }
     // Human intent revokes the lease before touching the page. A single manual
     // navigation waits for issued commands to settle; it is never an auto queue.
@@ -298,8 +311,8 @@ static LRESULT CALLBACK BrowserProc(HWND window, UINT message, WPARAM wparam, LP
         case WM_THEMECHANGED: case WM_SETTINGCHANGE: case WM_SYSCOLORCHANGE:
             if (b->toolbar) b->toolbar->theme_changed();
             return 0;
-        case shortcut_message:
-            if (b->toolbar) b->toolbar->shortcut(static_cast<UINT>(wparam), (lparam & 1) != 0, (lparam & 2) != 0);
+        case focus_toolbar_message:
+            if (b->toolbar) b->toolbar->focus_from_page(wparam != 0);
             return 0;
         case manual_navigation_message: b->drain_manual(); return 0;
         case WM_MOVE:
@@ -348,6 +361,11 @@ void Host::create(const std::string& request, const std::string& label) {
         if (auto b = weak.lock()) b->user_command(command);
     });
     if (FAILED(hr)) { close(b, "Native toolbar initialization failed"); return; }
+    // A separate native page container gives input ownership an explicit HWND
+    // boundary, excluding toolbar controls and unrelated browser windows.
+    b->page_window = CreateWindowEx(0, L"DistinctBrowserPage", L"", WS_CHILD | WS_VISIBLE | WS_CLIPCHILDREN,
+        0, 0, 0, 0, b->window, reinterpret_cast<HMENU>(static_cast<INT_PTR>(page_host_id)), GetModuleHandle(nullptr), nullptr);
+    if (!b->page_window) { close(b, "Page input window creation failed"); return; }
     ShowWindow(b->window, SW_SHOWNOACTIVATE); b->layout();
     b->profile = data_root / winrt::to_hstring(b->id).c_str();
     hr = CreateCoreWebView2EnvironmentWithOptions(nullptr, b->profile.c_str(), options.Get(),
@@ -369,7 +387,17 @@ void Host::create(const std::string& request, const std::string& label) {
                 close(b, "User data directory was overridden; independent browser isolation is unavailable"); return S_OK;
             }
             b->environment = env;
-            HRESULT result = env->CreateCoreWebView2Controller(b->window,
+            ComPtr<ICoreWebView2Environment10> environment10;
+            ComPtr<ICoreWebView2ControllerOptions> controller_options;
+            ComPtr<ICoreWebView2ControllerOptions4> input_options;
+            if (FAILED(env->QueryInterface(IID_PPV_ARGS(&environment10))) ||
+                FAILED(environment10->CreateCoreWebView2ControllerOptions(&controller_options)) ||
+                FAILED(controller_options.As(&input_options)) ||
+                FAILED(input_options->put_AllowHostInputProcessing(TRUE))) {
+                close(b, "WebView2 Runtime lacks host input processing; update Evergreen Runtime (138 or later)");
+                return S_OK;
+            }
+            HRESULT result = environment10->CreateCoreWebView2ControllerWithOptions(b->page_window, controller_options.Get(),
                 Callback<ICoreWebView2CreateCoreWebView2ControllerCompletedHandler>([this, b](HRESULT error, ICoreWebView2Controller* controller) -> HRESULT {
                     if (b->closing) { if (controller) controller->Close(); return S_OK; }
                     if (FAILED(error) || !controller) { close(b, "WebView2 controller initialization failed"); return S_OK; }
@@ -390,21 +418,17 @@ void Host::create(const std::string& request, const std::string& label) {
 void Host::initialize(const std::shared_ptr<Browser>& b) {
     std::weak_ptr<Browser> weak = b;
     EventRegistrationToken registration{};
-    checked(b->controller->add_AcceleratorKeyPressed(Callback<ICoreWebView2AcceleratorKeyPressedEventHandler>(
-        [weak](ICoreWebView2Controller*, ICoreWebView2AcceleratorKeyPressedEventArgs* args) -> HRESULT {
-            auto b = weak.lock(); if (!b || b->closing) return S_OK;
-            COREWEBVIEW2_KEY_EVENT_KIND kind{}; args->get_KeyEventKind(&kind);
-            if (kind != COREWEBVIEW2_KEY_EVENT_KIND_KEY_DOWN && kind != COREWEBVIEW2_KEY_EVENT_KIND_SYSTEM_KEY_DOWN) return S_OK;
-            UINT key = 0; args->get_VirtualKey(&key);
-            bool ctrl = GetKeyState(VK_CONTROL) < 0, alt = GetKeyState(VK_MENU) < 0;
-            if ((ctrl && (key == 'L' || key == 'R')) || (alt && (key == 'D' || key == VK_LEFT || key == VK_RIGHT)) ||
-                key == VK_F5 || (key == VK_ESCAPE && b->navigating)) {
+    // Host input processing lets the normal message loop handle shortcuts
+    // before WebView2. AcceleratorKeyPressed is asynchronous in this mode.
+    checked(b->controller->add_MoveFocusRequested(Callback<ICoreWebView2MoveFocusRequestedEventHandler>(
+        [weak](ICoreWebView2Controller*, ICoreWebView2MoveFocusRequestedEventArgs* args) -> HRESULT {
+            if (auto b = weak.lock(); b && !b->closing) {
+                COREWEBVIEW2_MOVE_FOCUS_REASON reason{}; args->get_Reason(&reason);
                 args->put_Handled(TRUE);
-                COREWEBVIEW2_PHYSICAL_KEY_STATUS status{}; args->get_PhysicalKeyStatus(&status);
-                if (!status.WasKeyDown) PostMessage(b->window, shortcut_message, key, (ctrl ? 1 : 0) | (alt ? 2 : 0));
+                PostMessage(b->window, focus_toolbar_message, reason == COREWEBVIEW2_MOVE_FOCUS_REASON_PREVIOUS, 0);
             }
             return S_OK;
-        }).Get(), &registration), "AcceleratorKeyPressed");
+        }).Get(), &registration), "MoveFocusRequested");
     checked(b->view->add_NavigationStarting(Callback<ICoreWebView2NavigationStartingEventHandler>(
         [this, weak](ICoreWebView2*, ICoreWebView2NavigationStartingEventArgs* args) -> HRESULT {
             if (auto b = weak.lock(); b && !b->closing) {
@@ -776,6 +800,9 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
         window_class.hCursor = LoadCursor(nullptr, IDC_ARROW); window_class.hbrBackground = reinterpret_cast<HBRUSH>(COLOR_WINDOW + 1);
         window_class.lpszClassName = L"DistinctBrowserWindow";
         if (!RegisterClass(&window_class)) throw Error("startup_failed", "Cannot register browser class");
+        WNDCLASS page_class{}; page_class.lpfnWndProc = DefWindowProc; page_class.hInstance = instance;
+        page_class.hCursor = LoadCursor(nullptr, IDC_ARROW); page_class.lpszClassName = L"DistinctBrowserPage";
+        if (!RegisterClass(&page_class)) throw Error("startup_failed", "Cannot register page input class");
         WNDCLASS dispatch_class{}; dispatch_class.lpfnWndProc = DispatcherProc; dispatch_class.hInstance = instance;
         dispatch_class.lpszClassName = L"DistinctBrowserDispatcher";
         if (!RegisterClass(&dispatch_class)) throw Error("startup_failed", "Cannot register dispatcher class");
@@ -818,11 +845,13 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
         MSG message{};
         while (GetMessage(&message, nullptr, 0, 0) > 0) {
             bool handled = false;
-            if (message.message == WM_KEYDOWN || message.message == WM_SYSKEYDOWN) {
-                HWND root = GetAncestor(message.hwnd, GA_ROOT);
-                for (auto& [id, browser] : host.browsers) {
-                    if (browser->window == root && browser->toolbar && browser->toolbar->pre_translate(message)) { handled = true; break; }
-                }
+            HWND root = GetAncestor(message.hwnd, GA_ROOT);
+            for (auto& [id, browser] : host.browsers) {
+                if (browser->window != root) continue;
+                if ((message.hwnd == browser->page_window || IsChild(browser->page_window, message.hwnd)) && page_input_intent(message))
+                    browser->human_input();
+                if (browser->toolbar) handled = browser->toolbar->pre_translate(message);
+                break;
             }
             if (!handled) { TranslateMessage(&message); DispatchMessage(&message); }
         }

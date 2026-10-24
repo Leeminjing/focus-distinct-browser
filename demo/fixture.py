@@ -22,12 +22,18 @@ let count=0; document.getElementById('name').textContent=name;
 if(!document.cookie.includes('session=')) document.cookie='session='+crypto.randomUUID()+'; path=/';
 if(!localStorage.getItem('session')) localStorage.setItem('session',crypto.randomUUID());
 function report(event){const data={event,name,count,text:document.getElementById('text').value,cookie:document.cookie,
-storage:localStorage.getItem('session'),scroll:scrollY};document.title=name+' | '+count+' | '+data.text;
+storage:localStorage.getItem('session'),scroll:scrollY,focus:document.activeElement.id};document.title=name+' | '+count+' | '+data.text;
 document.getElementById('values').textContent=JSON.stringify(data,null,2);
 fetch('/event',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(data)});}
 document.getElementById('text').addEventListener('input',()=>report('input'));
+document.addEventListener('focusin',()=>report('focus'));
 document.getElementById('increment').onclick=()=>{count++;report('click')};
 document.getElementById('popup').onclick=()=>window.open('/?name=popup','_blank');
+if(new URL(location.href).searchParams.has('hold_pointer')) {
+  document.getElementById('increment').addEventListener('pointerdown',()=>{
+    const request=new XMLHttpRequest();request.open('GET','/hold',false);request.send();
+  });
+}
 addEventListener('scroll',()=>report('scroll')); report('loaded');
 </script></body></html>'''
 
@@ -38,6 +44,8 @@ class Fixture:
         self.condition = threading.Condition()
         self.slow_started = threading.Event()
         self.slow_release = threading.Event()
+        self.hold_started = threading.Event()
+        self.hold_release = threading.Event()
         fixture = self
 
         class Handler(BaseHTTPRequestHandler):
@@ -45,6 +53,9 @@ class Fixture:
                 pass
 
             def do_GET(self):
+                if urlparse(self.path).path == "/hold":
+                    fixture.hold_started.set()
+                    fixture.hold_release.wait(timeout=15)
                 if urlparse(self.path).path == "/slow":
                     fixture.slow_started.set()
                     fixture.slow_release.wait(timeout=35)
@@ -73,13 +84,14 @@ class Fixture:
         from urllib.parse import quote
         return f"http://127.0.0.1:{self.server.server_port}/?name={quote(name)}"
 
-    def wait(self, predicate, timeout=10):
+    def wait(self, predicate, timeout=10, *, after=0):
         with self.condition:
-            if not self.condition.wait_for(lambda: any(predicate(item) for item in self.records), timeout):
+            if not self.condition.wait_for(lambda: any(predicate(item) for item in self.records[after:]), timeout):
                 raise AssertionError(f"Expected DOM effect missing. Recorded: {self.records[-5:]}")
-            return next(item for item in reversed(self.records) if predicate(item))
+            return next(item for item in reversed(self.records[after:]) if predicate(item))
 
     def close(self):
+        self.hold_release.set()
         self.slow_release.set()
         self.server.shutdown()
         self.server.server_close()

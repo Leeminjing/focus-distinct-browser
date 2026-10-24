@@ -10,7 +10,7 @@ v0.2 使用 Direct2D / DirectWrite 绘制单行 64 DIP 原生工具栏，保留 
 
 v0.3 在原有外壳上增加原生输入仲裁：用户直接点击、输入、滚动或拖动网页时，先撤销该页自动令牌，再把同一次输入交给 WebView2；悬停、焦点变化和展示窗口不接管。已派发操作保留真实收尾，交还后取得新租约并重新观察。沿用 JSONL v1，`control_changed.detail.reason` 增加 `human_input`。
 
-实现范围及消息测试、桌面测试与人工验收的区别见 [v0.3 说明](docs/v0.3.md)；原生外壳说明保留在 [v0.2](docs/v0.2.md)。当前 v0.3 是桌面验收待完成的预发布版。
+实现范围及消息测试、桌面测试与人工验收的区别见 [v0.3 说明](docs/v0.3.md)；原生外壳说明保留在 [v0.2](docs/v0.2.md)。v0.3.1 已通过系统输入注入的桌面套件，修复首次按键漏接、Alt 快捷键菜单抢焦点、跨视口拖拽丢抬键；真实 IME、触摸 / 笔和跨屏 DPI 仍待人工验收。
 
 ## 运行演示
 
@@ -71,11 +71,11 @@ python tests/failures.py
 
 `failures.py` 的超时检查约需 20 秒，并会终止它自己创建的 WebView2 测试进程。截图和验收摘要写入 `artifacts/`。
 
-以上协作自动检查向测试自己的原生 HWND 投递消息，不能代替物理设备和实际 IME 候选窗。桌面空闲时可单独运行 `python tests/desktop_input.py --run`，它会移动鼠标并向测试窗口注入系统输入；不要与其他桌面自动化并行。本轮按用户要求延后该套桌面验收，详见 [待验收清单](docs/v0.3.md#待补的桌面与人工验收)。
+标准协作检查向测试自己的原生 HWND 投递消息。桌面空闲时可单独运行 `python tests/desktop_input.py --run`，它会激活自己的测试窗口、移动鼠标并发送系统输入；不要与其他桌面自动化并行。v0.3.1 本机已通过该套 8 组检查，报告写入 `artifacts/desktop-validation.json`，含 EXE 摘要、Runtime、DPI、覆盖项与未验收项。系统注入不能代替物理设备和实际 IME 候选窗，详见 [验收记录](docs/v0.3-desktop-validation.md)。
 
 ## 使用边界
 
-每个窗口只有一个页面；额外弹窗会被阻止并报告。自动操作仅提供导航、坐标点击、文字、有限命名按键和滚动，不开放任意脚本或通用 CDP 调用。网页原生输入、进入地址栏及工具栏导航都会撤销自动令牌；仍可使用“接管 / 交还”按钮。这里的人工输入来自 Windows 原生消息，不是基于页面事件或 `isTrusted` 猜测来源。
+每个窗口只有一个页面；额外弹窗会被阻止并报告。自动操作仅提供导航、坐标点击、文字、有限命名按键和滚动，不开放任意脚本或通用 CDP 调用。网页原生输入、进入地址栏及工具栏导航都会撤销自动令牌；仍可使用“接管 / 交还”按钮。v0.3.1 以按前台焦点过滤的 `WH_KEYBOARD_LL` 补足 Runtime 漏传按下的问题：这是系统层全局键盘钩子，先确认焦点属于本进程窗口再读取按键，其他应用直接放行；不监听网页脚本，也不使用全局鼠标钩子。
 
 同一浏览器只接受一个在途操作；并发请求收到 `busy`，不积压动作，也不自动重试。不同浏览器可以各自等待异步结果。操作已处理不代表网页业务成功，调用者需要观察结果。
 
@@ -85,4 +85,4 @@ python tests/failures.py
 
 完整接口见 [协议](docs/protocol.md)，实现边界见 [设计](docs/design.md)。
 
-源码提交后可用 `./scripts/package.ps1` 打包单 EXE、`SHA256SUMS.txt` 和 `artifact.json`（含源码提交及协议版本），输出到 `artifacts/releases/v0.3.0/`。不要分发测试用的 `toolbar-component.exe`。
+源码提交后可用 `./scripts/package.ps1 -DesktopValidation artifacts/desktop-validation.json` 打包单 EXE、`SHA256SUMS.txt`、`artifact.json` 和与 EXE 摘要一致的验收报告，输出到 `artifacts/releases/v0.3.1/`。报告参数可省略；提供时摘要不符会拒绝打包。不要分发测试用的 `toolbar-component.exe`。

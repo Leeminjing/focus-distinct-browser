@@ -22,7 +22,11 @@ WebView2 的创建、截图和 CDP 操作均使用异步回调。A 等待结果�
 
 网页放在独立的原生子 HWND 中，Controller 的 Bounds 使用该容器的客户坐标；顶层工具栏仍占 64 DIP。Environment10 创建 ControllerOptions，Options4 启用 AllowHostInputProcessing，再以 CreateCoreWebView2ControllerWithOptions 创建 Controller。缺少接口或设置失败会关闭未就绪窗口、返回创建失败，不回退到只有按钮接管的实例。
 
-消息循环先匹配顶层窗口，再检查目标是否属于该页 HWND 子树。遇到鼠标按下、滚轮、按键 / 字符、IME 组合、接触中的指针 / 触摸或拖动，自动 / 可申请状态立即经现有 revoke 转为人工 / 接管中，并输出 reason=human_input；然后照常 TranslateMessage / DispatchMessage，保留首次输入。悬停、单独修饰键、Alt+Tab、激活和展示不算操作。人工 / 接管中不重复撤销或发事件；暂停、关闭、故障保持原有边界。CDP 直接进入网页运行时，不进入该宿主输入路径。没有全局输入钩子或生产网页脚本监听器。
+消息循环先匹配顶层窗口，再检查目标是否属于该页 HWND 子树。遇到鼠标按下、滚轮、按键 / 字符、IME 组合、接触中的指针 / 触摸或拖动，自动 / 可申请状态立即经现有 revoke 转为人工 / 接管中，并输出 reason=human_input；然后照常 TranslateMessage / DispatchMessage，保留首次输入。悬停、单独修饰键、Alt+Tab、激活和展示不算操作。人工 / 接管中不重复撤销或发事件；暂停、关闭、故障保持原有边界。CDP 直接进入网页运行时，不进入该宿主输入路径。
+
+v0.3.1 桌面实测发现普通字母按下未经过上述消息循环，因此 `src/window/keyboard_guard.h` 增加 `WH_KEYBOARD_LL` 保护。这是系统层全局钩子，不能称为“无全局钩子”；先核对当前前台窗口与焦点属于宿主，再读取按键。网页按键立即清除租约；COM、绘制及事件输出延迟到原生窗口消息处理。自有窗口的浏览器快捷键投递给既有 NativeToolbar，并消费对应按下 / 抬起和重复按下，避免双执行；已处理的 Alt 快捷键不再唤起系统菜单。其他应用直接放行，不读取或保存其按键。创建保护失败会使宿主启动失败；退出时卸载。它依赖 Windows 低级钩子机制与响应中的 UI 消息泵，未做长时间 UI 阻塞 / 钩子超时专项压力验收。
+
+鼠标仍走 WebView2 的宿主消息路径。前台网页左键按下处理后在同一线程的原生输入代理上 SetCapture，抬起处理完再 ReleaseCapture，使拖出视口后的原始移动 / 抬起仍进入原页面；不合成鼠标事件，也不注入拖拽脚本。
 
 ## 创建与隔离
 
@@ -52,7 +56,7 @@ CDP 输入直接发往指定 WebView2，不调用桌面 `SendInput`。多步 CDP
 
 ## 验证范围与尚未支持
 
-状态机、真实 WebView2 集成、原生外壳、明暗配色、96 / 144 DPI 组件、管道异常和故障检查均有可执行测试。v0.3 增加原生消息输入与在途 CDP 子步骤交错验证。系统输入注入套件单独运行，物理按键、IME 候选窗、跨显示器 DPI、实际触摸 / 笔与跨边界拖动仍需人工验收。本轮用户确认同机有其他桌面自动化，要求延后桌面验收，因此预发布不等于完整设备验收通过。详细记录见 [v0.3](v0.3.md)。多标签页、下载和资源池优化属于后续版本。
+状态机、真实 WebView2 集成、原生外壳、明暗配色、96 / 144 DPI 组件、管道异常和故障检查均有可执行测试。v0.3 增加原生消息输入与在途 CDP 子步骤交错验证。v0.3.1 的系统输入注入桌面套件已独立通过，包括跨视口拖拽与其他进程 / 浏览器隔离；物理设备、实际 IME、跨显示器 DPI 与触摸 / 笔仍未验收。详细记录见 [桌面验收](v0.3-desktop-validation.md)。多标签页、下载和资源池优化属于后续版本。
 
 ## 微软参考
 
@@ -65,3 +69,4 @@ CDP 输入直接发往指定 WebView2，不调用桌面 `SendInput`。多步 CDP
 - [进程模型](https://learn.microsoft.com/en-us/microsoft-edge/webview2/concepts/process-model)：独立用户数据目录和运行时进程组。
 - [前台激活](https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-setforegroundwindow)：展示窗口与前台激活结果分别报告。
 - [宿主输入处理](https://learn.microsoft.com/en-us/microsoft-edge/webview2/reference/win32/icorewebview2controlleroptions4)与[Controller 创建选项](https://learn.microsoft.com/en-us/microsoft-edge/webview2/reference/win32/icorewebview2environment10)：沿用窗口化 Controller 的原生输入路径。
+- [低级键盘回调](https://learn.microsoft.com/en-us/windows/win32/winmsg/lowlevelkeyboardproc)与[鼠标捕获](https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-setcapture)：v0.3.1 的输入保护与释放边界。

@@ -36,6 +36,7 @@ public:
     void focus_from_page(bool previous);
     void theme_changed();
     bool shortcut(UINT key, bool ctrl, bool alt);
+    bool page_shortcut(UINT key, bool ctrl, bool alt) const;
     bool pre_translate(const MSG& message);
     bool parent_message(UINT message, WPARAM wparam, LPARAM lparam, LRESULT& result);
     int height_pixels() const;

@@ -13,6 +13,7 @@
 #include "window/native_toolbar.h"
 #include "window/address_input.h"
 #include "window/page_input.h"
+#include "window/keyboard_guard.h"
 #include "host/pipe_output.h"
 #include <atomic>
 #include <filesystem>
@@ -34,6 +35,8 @@ using namespace distinct;
 namespace fs = std::filesystem;
 constexpr UINT input_message = WM_APP + 1, disconnected_message = WM_APP + 2;
 constexpr UINT manual_navigation_message = WM_APP + 4, focus_toolbar_message = WM_APP + 5;
+constexpr UINT human_input_message = WM_APP + 6;
+constexpr UINT page_shortcut_message = WM_APP + 7;
 constexpr int page_host_id = 108;
 constexpr uint64_t operation_timeout = 20000, create_timeout = 45000;
 static uint64_t now() { return GetTickCount64(); }
@@ -75,12 +78,12 @@ struct Browser : std::enable_shared_from_this<Browser> {
     ComPtr<ICoreWebView2> view;
     Control control;
     std::shared_ptr<Operation> active;
-    bool ready = false, navigating = true, closing = false;
+    bool ready = false, navigating = true, closing = false, suppress_key_menu = false;
     double viewport_width = 0, viewport_height = 0;
     void layout();
     void refresh();
     void user_command(ShellCommand command);
-    void human_input();
+    void human_input(bool defer_notification = false);
     void drain_manual();
 };
 struct Host {
@@ -227,10 +230,15 @@ void Browser::refresh() {
     }
     toolbar->update(state);
 }
-void Browser::human_input() {
+void Browser::human_input(bool defer_notification) {
     if (closing || !ready || (control.mode != Mode::automatic && control.mode != Mode::available)) return;
     notice.clear();
-    host->revoke(shared_from_this(), Mode::manual, "human_input");
+    if (defer_notification) {
+        // Revoke synchronously before the OS delivers the first key. Keep COM,
+        // painting and pipe notification out of the low-level input callback.
+        control.revoke(Mode::manual);
+        PostMessage(window, human_input_message, 0, 0);
+    } else host->revoke(shared_from_this(), Mode::manual, "human_input");
 }
 void Browser::user_command(ShellCommand command) {
     if (closing || !ready || control.mode == Mode::faulted) return;
@@ -302,6 +310,11 @@ static LRESULT CALLBACK BrowserProc(HWND window, UINT message, WPARAM wparam, LP
         LRESULT result = 0;
         if (b->toolbar && b->toolbar->parent_message(message, wparam, lparam, result)) return result;
         switch (message) {
+        case WM_SYSCOMMAND:
+            if ((wparam & 0xFFF0) == SC_KEYMENU && b->suppress_key_menu) {
+                b->suppress_key_menu = false; return 0;
+            }
+            break;
         case WM_GETMINMAXINFO: {
             auto limits = reinterpret_cast<MINMAXINFO*>(lparam);
             UINT dpi = GetDpiForWindow(window);
@@ -313,6 +326,12 @@ static LRESULT CALLBACK BrowserProc(HWND window, UINT message, WPARAM wparam, LP
             return 0;
         case focus_toolbar_message:
             if (b->toolbar) b->toolbar->focus_from_page(wparam != 0);
+            return 0;
+        case human_input_message:
+            b->refresh(); b->host->event(b->shared_from_this(), "control_changed", object({{L"reason", js("human_input")}}));
+            return 0;
+        case page_shortcut_message:
+            if (b->toolbar) b->toolbar->shortcut(static_cast<UINT>(wparam), (lparam & 1) != 0, (lparam & 2) != 0);
             return 0;
         case manual_navigation_message: b->drain_manual(); return 0;
         case WM_MOVE:
@@ -810,6 +829,29 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
         if (!host.dispatcher) throw Error("startup_failed", "Cannot create dispatcher");
         host.output = std::make_unique<PipeOutput>(output, [dispatcher = host.dispatcher] { PostMessage(dispatcher, disconnected_message, 0, 0); });
         SetTimer(host.dispatcher, 1, 200, nullptr);
+        KeyboardGuard keyboard_guard;
+        if (!keyboard_guard.start([&host]() -> HWND {
+            HWND focus = GetFocus(), foreground = GetForegroundWindow();
+            for (const auto& [id, browser] : host.browsers)
+                if (browser->window == foreground && (focus == browser->window || IsChild(browser->window, focus))) return focus;
+            return nullptr;
+        }, [&host](const MSG& message) {
+            HWND root = GetAncestor(message.hwnd, GA_ROOT);
+            for (const auto& [id, browser] : host.browsers) {
+                if (browser->window != root) continue;
+                if (message.wParam == VK_MENU || message.wParam == VK_LMENU || message.wParam == VK_RMENU) browser->suppress_key_menu = false;
+                const bool page = message.hwnd == browser->page_window || IsChild(browser->page_window, message.hwnd);
+                if (page && page_input_intent(message)) browser->human_input(true);
+                const bool ctrl = GetAsyncKeyState(VK_CONTROL) < 0, alt = (message.lParam & (1LL << 29)) != 0;
+                if (browser->toolbar && browser->toolbar->page_shortcut(static_cast<UINT>(message.wParam), ctrl, alt)) {
+                    if (alt) browser->suppress_key_menu = true;
+                    PostMessage(browser->window, page_shortcut_message, message.wParam, (ctrl ? 1 : 0) | (alt ? 2 : 0));
+                    return true;
+                }
+                break;
+            }
+            return false;
+        })) throw Error("startup_failed", "Cannot install native keyboard takeover protection");
         host.send(object({{L"event", js("ready")}, {L"protocol_version", jn(1)}, {L"pid", jn(GetCurrentProcessId())}}));
         std::atomic<bool> stopping = false;
         HANDLE slots = CreateSemaphore(nullptr, 128, 128, nullptr);
@@ -845,15 +887,24 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
         MSG message{};
         while (GetMessage(&message, nullptr, 0, 0) > 0) {
             bool handled = false;
+            bool capture_page_drag = false;
             HWND root = GetAncestor(message.hwnd, GA_ROOT);
             for (auto& [id, browser] : host.browsers) {
                 if (browser->window != root) continue;
-                if ((message.hwnd == browser->page_window || IsChild(browser->page_window, message.hwnd)) && page_input_intent(message))
+                const bool page = message.hwnd == browser->page_window || IsChild(browser->page_window, message.hwnd);
+                capture_page_drag = page && GetForegroundWindow() == root &&
+                    (message.message == WM_LBUTTONDOWN || message.message == WM_LBUTTONDBLCLK);
+                if (page && page_input_intent(message))
                     browser->human_input();
                 if (browser->toolbar) handled = browser->toolbar->pre_translate(message);
                 break;
             }
             if (!handled) { TranslateMessage(&message); DispatchMessage(&message); }
+            // With host input processing some runtimes lose the renderer's
+            // capture outside the viewport. Retain capture on the native input
+            // proxy so the original drag/release continues through WebView2.
+            if (capture_page_drag && IsWindow(message.hwnd)) SetCapture(message.hwnd);
+            if (message.message == WM_LBUTTONUP && GetCapture() == message.hwnd) ReleaseCapture();
         }
         stopping = true;
         while (WaitForSingleObject(reader.native_handle(), 50) == WAIT_TIMEOUT)

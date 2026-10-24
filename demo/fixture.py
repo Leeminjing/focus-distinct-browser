@@ -22,11 +22,13 @@ let count=0; document.getElementById('name').textContent=name;
 if(!document.cookie.includes('session=')) document.cookie='session='+crypto.randomUUID()+'; path=/';
 if(!localStorage.getItem('session')) localStorage.setItem('session',crypto.randomUUID());
 function report(event){const data={event,name,count,text:document.getElementById('text').value,cookie:document.cookie,
-storage:localStorage.getItem('session'),scroll:scrollY,focus:document.activeElement.id};document.title=name+' | '+count+' | '+data.text;
+storage:localStorage.getItem('session'),scroll:scrollY,focus:document.activeElement.id,pointer:window.lastPointer||null,
+selection:[document.getElementById('text').selectionStart,document.getElementById('text').selectionEnd]};document.title=name+' | '+count+' | '+data.text;
 document.getElementById('values').textContent=JSON.stringify(data,null,2);
 fetch('/event',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(data)});}
 document.getElementById('text').addEventListener('input',()=>report('input'));
 document.addEventListener('focusin',()=>report('focus'));
+document.addEventListener('pointerup',e=>{window.lastPointer={x:e.clientX,y:e.clientY,target:e.target.id,buttons:e.buttons};report('pointerup')});
 document.getElementById('increment').onclick=()=>{count++;report('click')};
 document.getElementById('popup').onclick=()=>window.open('/?name=popup','_blank');
 if(new URL(location.href).searchParams.has('hold_pointer')) {

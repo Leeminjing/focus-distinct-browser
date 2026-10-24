@@ -1,6 +1,7 @@
 param(
     [string]$Executable = 'build/distinct-browser.exe',
-    [string]$Version = '0.3.0'
+    [string]$Version = '0.3.1',
+    [string]$DesktopValidation
 )
 $ErrorActionPreference = 'Stop'
 $projectRoot = Split-Path $PSScriptRoot -Parent
@@ -27,6 +28,15 @@ try {
         source_commit = $commit
         protocol_version = 1
         required_runtime = 'Microsoft Edge WebView2 Evergreen Runtime (138+; host input processing required)'
+    }
+    if ($DesktopValidation) {
+        $validation = Get-Content -LiteralPath $DesktopValidation -Raw | ConvertFrom-Json
+        if ($validation.executable_sha256 -ne $hash) { throw 'Desktop validation report does not match the executable' }
+        $reportPath = Join-Path $destination 'desktop-validation.json'
+        Copy-Item -LiteralPath $DesktopValidation -Destination $reportPath -Force
+        $metadata.desktop_validation = 'desktop-validation.json'
+        $reportHash = (Get-FileHash -LiteralPath $reportPath -Algorithm SHA256).Hash.ToLowerInvariant()
+        [System.IO.File]::AppendAllText((Join-Path $destination 'SHA256SUMS.txt'), "$reportHash  desktop-validation.json`n", [System.Text.UTF8Encoding]::new($false))
     }
     $json = $metadata | ConvertTo-Json
     [System.IO.File]::WriteAllText((Join-Path $destination 'artifact.json'), "$json`n", [System.Text.UTF8Encoding]::new($false))

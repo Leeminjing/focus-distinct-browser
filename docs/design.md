@@ -24,7 +24,7 @@ WebView2 的创建、截图和 CDP 操作均使用异步回调。A 等待结果�
 
 用户点击“接管”后立即阻止后续派发；有已发操作时显示“接管中”，回调收尾后转“人工控制”。最后一个已发步骤的真实成功仍可以返回；多步动作中尚未发送的步骤会被拒绝。交还只开放新租约，旧操作不会恢复。
 
-CDP 输入直接发往指定 WebView2，不调用桌面 `SendInput`。多步 CDP 等前一回调再派发下一步。导航通过 WebView2 API，并以导航 ID 关联完成事件。导航或视口变化会使旧观察失效，防止继续使用明显过时的坐标。
+CDP 输入直接发往指定 WebView2，不调用桌面 `SendInput`。多步 CDP 等前一回调再派发下一步。导航通过 WebView2 API：跨文档请求按自己的导航 ID 结算，与浏览器最新文档的加载状态分开处理；同文档请求根据 `SourceChanged` / `HistoryChanged` 和规范化目标 URL 结算。HTTP 重定向沿用同一 ID；不同 ID 的新导航使旧请求以 `navigation_superseded` 结束，旧完成事件不能清除新页面的加载标志。取消和正常失败保留 Runtime 原始状态并结算，不升级成宿主故障。导航或视口变化会使旧观察失效，防止继续使用明显过时的坐标。
 
 截图通过 `CapturePreview` 写入内存 IStream，再编码为 PNG base64；CSS 视口来自 `Page.getLayoutMetrics`。真实窗口由 WebView2 直接渲染，没有截图播放层。
 
@@ -45,6 +45,7 @@ CDP 输入直接发往指定 WebView2，不调用桌面 `SendInput`。多步 CDP
 - [线程模型](https://learn.microsoft.com/en-us/microsoft-edge/webview2/concepts/threading-model)：COM 与回调保持在带消息循环的 STA UI 线程。
 - [静态 Loader](https://learn.microsoft.com/en-us/microsoft-edge/webview2/how-to/static)：单 EXE 分发仍需要 WebView2 Runtime。
 - [ICoreWebView2](https://learn.microsoft.com/en-us/microsoft-edge/webview2/reference/win32/icorewebview2)：CapturePreview、CDP、导航与输入顺序边界。
+- [导航事件](https://learn.microsoft.com/en-us/microsoft-edge/webview2/concepts/navigation-events)：同文档导航没有 NavigationStarting，重叠导航及 HTTP 重定向的 ID 语义。
 - [ReleaseChannels](https://learn.microsoft.com/en-us/microsoft-edge/webview2/reference/win32/icorewebview2environmentoptions7)：选择稳定 Runtime。
 - [进程模型](https://learn.microsoft.com/en-us/microsoft-edge/webview2/concepts/process-model)：独立用户数据目录和运行时进程组。
 - [前台激活](https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-setforegroundwindow)：展示窗口与前台激活结果分别报告。

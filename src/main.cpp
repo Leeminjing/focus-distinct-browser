@@ -7,6 +7,7 @@
 #include <WebView2.h>
 #include <WebView2EnvironmentOptions.h>
 #include <winrt/base.h>
+#include <winrt/Windows.Foundation.h>
 #include "json.h"
 #include "control.h"
 #include <atomic>
@@ -42,6 +43,10 @@ static std::string owned_text(LPWSTR text) {
     CoTaskMemFree(text); return result;
 }
 static Json parse(PCWSTR text) { return Json::Parse(text ? text : L"{}"); }
+static std::wstring canonical_uri(PCWSTR text) {
+    auto uri = winrt::Windows::Foundation::Uri(text).AbsoluteCanonicalUri();
+    return std::wstring(uri.c_str(), uri.size());
+}
 
 // Pipe backpressure must never block the window's UI thread. A failed writer
 // revokes the connection just like EOF on stdin. The bounded queue caps memory.
@@ -97,6 +102,7 @@ private:
 struct Host;
 struct Operation {
     std::string request, token, kind;
+    std::wstring navigation_target;
     uint64_t started = now(), revision = 0, navigation_id = 0;
     size_t dispatched = 0, completed = 0;
     bool done = false;
@@ -156,8 +162,12 @@ struct Host {
         op->done = true;
         if (b->active == op) { b->active.reset(); b->control.end(); }
         if (code.empty()) success(op->request, result);
-        else failure(op->request, code, message, object({{L"dispatched_steps", jn(static_cast<double>(op->dispatched))},
-            {L"completed_steps", jn(static_cast<double>(op->completed))}, {L"result_unknown", jb(op->dispatched > 0)}}));
+        else {
+            result.SetNamedValue(L"dispatched_steps", jn(static_cast<double>(op->dispatched)));
+            result.SetNamedValue(L"completed_steps", jn(static_cast<double>(op->completed)));
+            result.SetNamedValue(L"result_unknown", jb(op->dispatched > 0));
+            failure(op->request, code, message, result);
+        }
         b->refresh();
         if (b->control.mode == Mode::manual) event(b, "control_changed");
     }
@@ -210,6 +220,24 @@ struct Host {
     }
     void create(const std::string& request, const std::string& label);
     void initialize(const std::shared_ptr<Browser>& b);
+    void navigation_succeeded(const std::shared_ptr<Browser>& b, const std::shared_ptr<Operation>& op, bool same_document) {
+        b->control.observed = false; ++b->revision;
+        op->completed = 1;
+        finish(b, op, "", "", object({{L"navigation_completed", jb(true)}, {L"same_document", jb(same_document)}}));
+    }
+    void finish_same_document_navigation(const std::shared_ptr<Browser>& b) {
+        auto op = b->active;
+        if (b->navigating || !op || op->kind != "navigate" || op->navigation_id != 0) return;
+        LPWSTR source = nullptr;
+        if (FAILED(b->view->get_Source(&source))) return;
+        auto actual = owned_text(source);
+        try {
+            if (canonical_uri(winrt::to_hstring(actual).c_str()) == op->navigation_target) {
+                navigation_succeeded(b, op, true);
+                event(b, "navigation_completed", object({{L"success", jb(true)}, {L"same_document", jb(true)}}));
+            }
+        } catch (...) { finish(b, op, "navigation_failed", "Could not compare the same-document navigation URL"); }
+    }
     void handle(const std::string& line);
     void observe(const std::shared_ptr<Browser>& b, const std::shared_ptr<Operation>& op);
     void dispatch_step(const std::shared_ptr<Browser>& b, const std::shared_ptr<Operation>& op);
@@ -375,12 +403,25 @@ void Host::initialize(const std::shared_ptr<Browser>& b) {
     std::weak_ptr<Browser> weak = b;
     EventRegistrationToken registration{};
     checked(b->view->add_NavigationStarting(Callback<ICoreWebView2NavigationStartingEventHandler>(
-        [weak](ICoreWebView2*, ICoreWebView2NavigationStartingEventArgs* args) -> HRESULT {
+        [this, weak](ICoreWebView2*, ICoreWebView2NavigationStartingEventArgs* args) -> HRESULT {
             if (auto b = weak.lock(); b && !b->closing) {
                 b->navigating = true; ++b->revision; b->control.observed = false;
                 args->get_NavigationId(&b->navigation_id);
-                if (b->active && b->active->kind == "navigate" && b->active->navigation_id == 0)
-                    args->get_NavigationId(&b->active->navigation_id);
+                auto op = b->active;
+                if (op && op->kind == "navigate") {
+                    if (op->navigation_id == 0) {
+                        LPWSTR uri = nullptr;
+                        args->get_Uri(&uri);
+                        auto requested = owned_text(uri);
+                        try {
+                            if (canonical_uri(winrt::to_hstring(requested).c_str()) == op->navigation_target)
+                                op->navigation_id = b->navigation_id;
+                            else finish(b, op, "navigation_superseded", "Another navigation started before the requested navigation");
+                        } catch (...) { finish(b, op, "navigation_failed", "Could not match the starting navigation URL"); }
+                    }
+                    else if (op->navigation_id != b->navigation_id)
+                        finish(b, op, "navigation_superseded", "A new document navigation replaced the requested navigation");
+                }
             }
             return S_OK;
         }).Get(), &registration), "NavigationStarting");
@@ -388,10 +429,10 @@ void Host::initialize(const std::shared_ptr<Browser>& b) {
         [this, weak](ICoreWebView2*, ICoreWebView2NavigationCompletedEventArgs* args) -> HRESULT {
             auto b = weak.lock(); if (!b || b->closing) return S_OK;
             uint64_t navigation_id = 0; args->get_NavigationId(&navigation_id);
-            if (navigation_id != b->navigation_id) return S_OK;
-            b->navigating = false;
+            bool latest = navigation_id == b->navigation_id;
+            if (latest) b->navigating = false;
             BOOL ok = FALSE; args->get_IsSuccess(&ok);
-            if (!b->ready) {
+            if (!b->ready && latest) {
                 if (!ok) { close(b, "Initial navigation failed"); return S_OK; }
                 b->ready = true;
                 auto id = std::exchange(b->creation, "");
@@ -402,22 +443,49 @@ void Host::initialize(const std::shared_ptr<Browser>& b) {
                 b->refresh(); event(b, "created");
             }
             auto op = b->active;
+            // Settle the request by its own ID, independently of which document
+            // now owns the browser's loading state. Old completions cannot clear
+            // the replacement navigation's loading flag.
             if (op && op->kind == "navigate" && op->navigation_id == navigation_id) {
-                if (ok) { op->completed = 1; finish(b, op, "", "", object({{L"navigation_completed", jb(true)}})); }
-                else finish(b, op, "navigation_failed", "Navigation did not complete successfully; inspect the current page");
+                if (ok) navigation_succeeded(b, op, false);
+                else {
+                    COREWEBVIEW2_WEB_ERROR_STATUS status = COREWEBVIEW2_WEB_ERROR_STATUS_UNKNOWN;
+                    args->get_WebErrorStatus(&status);
+                    bool cancelled = status == COREWEBVIEW2_WEB_ERROR_STATUS_OPERATION_CANCELED;
+                    finish(b, op, cancelled ? "navigation_cancelled" : "navigation_failed",
+                        cancelled ? "Navigation was cancelled; inspect the current page" : "Navigation did not complete successfully; inspect the current page",
+                        object({{L"web_error_status", jn(status)}}));
+                }
             }
-            event(b, "navigation_completed", object({{L"success", jb(ok != FALSE)}}));
+            if (latest) event(b, "navigation_completed", object({{L"success", jb(ok != FALSE)}, {L"same_document", jb(false)}}));
             return S_OK;
         }).Get(), &registration), "NavigationCompleted");
     checked(b->view->add_SourceChanged(Callback<ICoreWebView2SourceChangedEventHandler>(
-        [weak](ICoreWebView2* view, ICoreWebView2SourceChangedEventArgs*) -> HRESULT {
+        [this, weak](ICoreWebView2* view, ICoreWebView2SourceChangedEventArgs* args) -> HRESULT {
             if (auto b = weak.lock(); b && !b->closing) {
                 b->control.observed = false; ++b->revision;
                 LPWSTR source = nullptr;
-                if (SUCCEEDED(view->get_Source(&source))) { SetWindowText(b->address, source); CoTaskMemFree(source); }
+                if (SUCCEEDED(view->get_Source(&source))) {
+                    SetWindowText(b->address, source);
+                    CoTaskMemFree(source);
+                    BOOL new_document = TRUE; args->get_IsNewDocument(&new_document);
+                    // Fragment navigation has no NavigationStarting/Completed.
+                    // Match the requested URL, not an unrelated history update.
+                    if (!new_document) finish_same_document_navigation(b);
+                }
             }
             return S_OK;
         }).Get(), &registration), "SourceChanged");
+    checked(b->view->add_HistoryChanged(Callback<ICoreWebView2HistoryChangedEventHandler>(
+        [this, weak](ICoreWebView2*, IUnknown*) -> HRESULT {
+            // Repeating the current fragment can change history without a
+            // SourceChanged event. A same-URL full document reload must still
+            // wait for its NavigationStarting/Completed sequence.
+            if (auto b = weak.lock(); b && !b->closing && b->active &&
+                b->active->navigation_target.find(L'#') != std::wstring::npos)
+                finish_same_document_navigation(b);
+            return S_OK;
+        }).Get(), &registration), "HistoryChanged");
     checked(b->view->add_NewWindowRequested(Callback<ICoreWebView2NewWindowRequestedEventHandler>(
         [this, weak](ICoreWebView2*, ICoreWebView2NewWindowRequestedEventArgs* args) -> HRESULT {
             args->put_Handled(TRUE);
@@ -607,6 +675,7 @@ void Host::handle(const std::string& line) {
                 if (scheme != "http" && scheme != "https" && scheme != "about" && scheme != "file")
                     throw Error("invalid_action", "Supported URL schemes: http, https, about, file");
                 destination = winrt::to_hstring(url).c_str(); op->kind = "navigate";
+                op->navigation_target = canonical_uri(destination.c_str());
             } else if (type == "text") {
                 auto text = string(action, L"text", 65536);
                 op->steps.emplace_back(L"Input.insertText", object({{L"text", js(text)}}));

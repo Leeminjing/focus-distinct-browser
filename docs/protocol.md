@@ -57,7 +57,7 @@
 
 | action | 字段 | 语义 |
 | --- | --- | --- |
-| `navigate` | `url` | 支持 `http:`、`https:`、`about:`、`file:`，最多 8192 字节。等匹配的 `NavigationCompleted` 后响应；成功返回 `navigation_completed:true` |
+| `navigate` | `url` | 支持 `http:`、`https:`、`about:`、`file:`，最多 8192 字节。跨文档导航等匹配的 `NavigationCompleted`；同文档导航以目标 URL 匹配的 `SourceChanged` / `HistoryChanged` 收尾。成功返回 `navigation_completed:true`、`same_document` |
 | `click` | `x`, `y` | CSS 视口内的左键按下、抬起，分两次 CDP 调用顺序完成 |
 | `scroll` | `x`, `y`, `delta_y`, 可选 `delta_x` | 发出滚轮事件；位移每轴范围 -10,000–10,000，横向默认 0 |
 | `text` | `text` | 向当前网页焦点插入非空文字，最多 65,536 字节；调用者应先点击输入位置 |
@@ -70,6 +70,10 @@
 ```
 
 输入动作成功返回 `command_processed:true`、`business_success_verified:false` 和 `control_still_valid`。这表示 CDP 回调已完成，调用者还需观察网页业务结果。即使最后一条已发命令成功，操作收尾时租约也可能已经失效。
+
+同文档跳转（包括重复跳到当前锚点）也会清除旧观察资格，下一步动作前需要再次 `observe`。HTTP 重定向沿用原导航 ID，仍等待整个导航完成。后续不同 ID 的文档导航取代在途请求时，原请求返回 `navigation_superseded`，替代导航继续运行；其旧完成事件不会清除替代页面的加载状态。
+
+正常取消或加载失败不会把浏览器置为 `faulted`，租约仍然可用。WebView2 报告 `OPERATION_CANCELED` 时返回 `navigation_cancelled`，其他失败返回 `navigation_failed`，详情中的 `web_error_status` 保留 Runtime 原始错误值。例如页面执行 `window.stop()` 在当前验证的 Runtime 上返回 `CONNECTION_ABORTED`（9），因此按加载失败结算；不把这个值伪装成 `OPERATION_CANCELED`（14）。真正没有结束信号的在途操作仍保留 20 秒故障超时。
 
 对于多步动作，接管发生后不再派发剩余步骤，因此可能只有按下已发生；宿主不会声称已经撤回这些效果。失败详情含 `dispatched_steps`、`completed_steps`、`result_unknown`；已经派发过的操作不能据此假定没有产生效果。
 
@@ -99,6 +103,6 @@ EOF、stdout 写失败或输出队列超过 64 MiB 都视为断连：统一撤�
 
 ## 常见错误码
 
-`invalid_request`、`unknown_method`、`runtime_missing`、`creation_failed`、`browser_not_found`、`browser_not_ready`、`busy`、`control_unavailable`、`window_paused`、`invalid_token`、`observation_required`、`page_loading`、`page_changed`、`invalid_action`、`navigation_failed`、`observation_failed`、`capture_failed`、`action_failed`、`browser_faulted`、`browser_closed`。
+`invalid_request`、`unknown_method`、`runtime_missing`、`creation_failed`、`browser_not_found`、`browser_not_ready`、`busy`、`control_unavailable`、`window_paused`、`invalid_token`、`observation_required`、`page_loading`、`page_changed`、`invalid_action`、`navigation_failed`、`navigation_cancelled`、`navigation_superseded`、`observation_failed`、`capture_failed`、`action_failed`、`browser_faulted`、`browser_closed`。
 
 失败不自动重试，尤其不要盲目重发带 `result_unknown:true` 的动作。`busy` 也不代表动作已入队；收到错误的调用者需要根据最新控制状态重新决定下一步。

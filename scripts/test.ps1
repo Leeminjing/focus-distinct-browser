@@ -8,6 +8,8 @@ try {
     if ($LASTEXITCODE) { throw 'Control tests failed' }
     & python tests/integration.py $Executable
     if ($LASTEXITCODE) { throw 'Integration tests failed' }
+    & python tests/navigation.py $Executable
+    if ($LASTEXITCODE) { throw 'Navigation regression tests failed' }
     & python tests/protocol.py $Executable
     if ($LASTEXITCODE) { throw 'Protocol tests failed' }
     & python tests/failures.py $Executable

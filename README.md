@@ -37,6 +37,7 @@ ctest --test-dir build/cmake -C Release --output-on-failure
 ```powershell
 ./scripts/build.ps1
 python tests/integration.py
+python tests/navigation.py
 python tests/protocol.py
 python tests/failures.py
 ```
@@ -49,6 +50,7 @@ python tests/failures.py
 - 截图及 CSS 视口、展示原页面、共享控制、重新观察、原生按钮接管、已发导航收尾。
 - 最小化 / 隐藏、恢复后交还、租约到期与续期、关闭后标识失效、断连保留人工窗口。
 - 弹窗阻止、畸形 JSON、分片 UTF-8、行大小限制和 EOF。
+- 同文档锚点跳转、重复锚点、移除锚点、HTTP 重定向、页面取消和后续导航取代时的准确收尾。
 - Runtime 缺失、用户数据目录被配置覆盖、测试专属 WebView2 进程故障、操作超时。
 
 `failures.py` 的超时检查约需 20 秒，并会终止它自己创建的 WebView2 测试进程。截图和验收摘要写入 `artifacts/`。

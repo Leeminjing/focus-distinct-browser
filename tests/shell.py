@@ -154,6 +154,16 @@ def run():
                    "F5 did not refresh")
         print("PASS F5 shortcut through the native message loop", flush=True)
 
+        # A port separator is not a URI scheme. Localhost is case insensitive;
+        # this exercises the same native EDIT path without external DNS/network.
+        port_url = page.url("AddressPort").replace("127.0.0.1", "LOCALHOST")
+        native_navigate(port_url.removeprefix("http://"))
+        assert text(status) != "地址格式不支持", "Scheme-less host:port rejected as a URI scheme"
+        page.wait(lambda r: r["name"] == "AddressPort")
+        wait_until(lambda: text(address).lower() == port_url.lower(), "Host:port address did not navigate")
+        assert text(status) == "人工控制"
+        print("PASS scheme-less host:port through native address input", flush=True)
+
         client.disconnect()
         wait_until(lambda: text(status) == "连接已断开", "Disconnect is not visible")
         assert not user32.IsWindowEnabled(user32.GetDlgItem(hwnd, 101))

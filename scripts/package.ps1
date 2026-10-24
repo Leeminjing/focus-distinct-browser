@@ -1,6 +1,6 @@
 param(
     [string]$Executable = 'build/distinct-browser.exe',
-    [string]$Version = '0.2.0'
+    [string]$Version = '0.2.1'
 )
 $ErrorActionPreference = 'Stop'
 $projectRoot = Split-Path $PSScriptRoot -Parent

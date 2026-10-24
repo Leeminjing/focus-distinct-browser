@@ -77,4 +77,4 @@ python tests/failures.py
 
 完整接口见 [协议](docs/protocol.md)，实现边界见 [设计](docs/design.md)。
 
-源码提交后可用 `./scripts/package.ps1` 打包单 EXE、`SHA256SUMS.txt` 和 `artifact.json`（含源码提交及协议版本），输出到 `artifacts/releases/v0.2.0/`。不要分发测试用的 `toolbar-component.exe`。
+源码提交后可用 `./scripts/package.ps1` 打包单 EXE、`SHA256SUMS.txt` 和 `artifact.json`（含源码提交及协议版本），输出到 `artifacts/releases/v0.2.1/`。不要分发测试用的 `toolbar-component.exe`。

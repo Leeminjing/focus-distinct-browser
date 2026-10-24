@@ -11,6 +11,7 @@
 #include "json.h"
 #include "control.h"
 #include "window/native_toolbar.h"
+#include "window/address_input.h"
 #include "host/pipe_output.h"
 #include <atomic>
 #include <filesystem>
@@ -251,13 +252,11 @@ void Browser::user_command(ShellCommand command) {
         auto first = pending_address.find_first_not_of(L" \t\r\n");
         if (first == std::wstring::npos) { notice = L"请输入地址"; refresh(); return; }
         pending_address = pending_address.substr(first, pending_address.find_last_not_of(L" \t\r\n") - first + 1);
-        if (pending_address.find(L":") == std::wstring::npos) pending_address = L"https://" + pending_address;
-        else if (pending_address.rfind(L"localhost:", 0) == 0 || iswdigit(pending_address[0])) pending_address = L"http://" + pending_address;
-        auto scheme = pending_address.substr(0, pending_address.find(L':'));
-        std::transform(scheme.begin(), scheme.end(), scheme.begin(), towlower);
-        if (scheme != L"http" && scheme != L"https" && scheme != L"about" && scheme != L"file") {
+        auto url = address_url(pending_address);
+        if (!url) {
             notice = L"地址格式不支持"; refresh(); return;
         }
+        pending_address = std::move(*url);
     }
     pending_manual = command;
     if (active) {

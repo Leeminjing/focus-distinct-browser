@@ -6,6 +6,8 @@ try {
     $Executable = [System.IO.Path]::GetFullPath($Executable)
     & (Join-Path (Split-Path $Executable -Parent) 'control-tests.exe')
     if ($LASTEXITCODE) { throw 'Control tests failed' }
+    & (Join-Path (Split-Path $Executable -Parent) 'address-tests.exe')
+    if ($LASTEXITCODE) { throw 'Address tests failed' }
     & python tests/integration.py $Executable
     if ($LASTEXITCODE) { throw 'Integration tests failed' }
     & python tests/navigation.py $Executable

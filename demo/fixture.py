@@ -52,7 +52,10 @@ class Fixture:
                 self.send_header("Content-Type", "text/html; charset=utf-8")
                 self.send_header("Content-Length", str(len(HTML)))
                 self.end_headers()
-                self.wfile.write(HTML)
+                try:
+                    self.wfile.write(HTML)
+                except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
+                    pass  # Stop/navigation cancellation intentionally closes the request.
 
             def do_POST(self):
                 data = json.loads(self.rfile.read(int(self.headers["Content-Length"])))

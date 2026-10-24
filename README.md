@@ -1,8 +1,14 @@
-# Distinct Browser
+# Distinct Browser · v0.2 Native Browser Shell
 
 一个 Windows 11 x64 原生浏览器宿主：C++17、Win32 窗口、系统 WebView2 Runtime。每个浏览器有真实窗口、独立数据目录和控制权状态。一个进程可以代表多个逻辑调用者，通过重定向的 stdin/stdout 发送 UTF-8 JSON 行。
 
 交付文件是 `build/distinct-browser.exe`。静态链接 WebView2 Loader 和 MSVC CRT，无需旁带 Loader DLL、VC++ Redistributable 或 .NET；机器仍须安装 WebView2 Evergreen Runtime。SDK 是构建依赖，Python 只用于演示和验收。
+
+v0.2 使用 Direct2D / DirectWrite 绘制单行 64 DIP 原生工具栏，保留 Windows 原生地址编辑框。支持返回、前进、刷新 / 停止、地址输入、明暗主题与 DPI 缩放，控制状态和接管入口始终可见。页面、窗口和登录数据不会因为工具栏操作而重建，JSONL 协议仍为 v1。
+
+![v0.2 真实窗口中的 WebView2 测试页](docs/images/v0.2-shell.png)
+
+实现范围、键盘操作和验证限制见 [v0.2 交付说明](docs/v0.2.md)。
 
 ## 运行演示
 
@@ -38,13 +44,15 @@ ctest --test-dir build/cmake -C Release --output-on-failure
 ./scripts/build.ps1
 python tests/integration.py
 python tests/navigation.py
+python tests/shell.py
+python tests/toolbar_component.py
 python tests/protocol.py
 python tests/failures.py
 ```
 
 编译后也可用 `./scripts/test.ps1` 一次运行全部检查。
 
-构建脚本运行控制权状态机测试；其余测试直接启动真实 EXE 和 WebView2，不使用浏览器模拟对象：
+构建脚本运行控制权状态机测试，并编译原生工具栏组件测试宿主。集成检查启动真实 EXE 和 WebView2；组件检查直接复用生产工具栏，不模拟绘制实现：
 
 - 双窗口并行、独立 Cookie / localStorage、真实 DOM 输入与点击、系统鼠标位置保持。
 - 截图及 CSS 视口、展示原页面、共享控制、重新观察、原生按钮接管、已发导航收尾。
@@ -52,12 +60,14 @@ python tests/failures.py
 - 弹窗阻止、畸形 JSON、分片 UTF-8、行大小限制和 EOF。
 - 同文档锚点跳转、重复锚点、移除锚点、HTTP 重定向、页面取消和后续导航取代时的准确收尾。
 - Runtime 缺失、用户数据目录被配置覆盖、测试专属 WebView2 进程故障、操作超时。
+- 原生工具栏导航、Cookie / localStorage 保留、旧令牌失效、在途操作收尾、加载反馈、窗口缩放、中文选择编辑、IME 确认键保护及快捷键处理路径。
+- 明暗配色、96 / 144 DPI 组件几何和原生窗口截图。主题测试使用测试进程独立的注册表映射，不改用户的系统主题。
 
 `failures.py` 的超时检查约需 20 秒，并会终止它自己创建的 WebView2 测试进程。截图和验收摘要写入 `artifacts/`。
 
 ## 使用边界
 
-每个窗口只有一个页面；额外弹窗会被阻止并报告。自动操作仅提供导航、坐标点击、文字、有限命名按键和滚动，不开放任意脚本或通用 CDP 调用。首次真人输入不会自动接管，使用工具栏按钮交接。
+每个窗口只有一个页面；额外弹窗会被阻止并报告。自动操作仅提供导航、坐标点击、文字、有限命名按键和滚动，不开放任意脚本或通用 CDP 调用。进入地址栏或使用工具栏导航会撤销自动令牌；直接点击或输入网页内容的自动接管留待 v0.3，当前仍可用工具栏按钮交接。
 
 同一浏览器只接受一个在途操作；并发请求收到 `busy`，不积压动作，也不自动重试。不同浏览器可以各自等待异步结果。操作已处理不代表网页业务成功，调用者需要观察结果。
 
@@ -66,3 +76,5 @@ python tests/failures.py
 用户数据位于 `%LOCALAPPDATA%/DistinctBrowser/Profiles/<browser_id>/`。关闭不会自动删除这些目录，当前版本不支持进程重启后恢复原标识；如需清理，应在相关宿主和 WebView2 进程退出后处理。
 
 完整接口见 [协议](docs/protocol.md)，实现边界见 [设计](docs/design.md)。
+
+源码提交后可用 `./scripts/package.ps1` 打包单 EXE、`SHA256SUMS.txt` 和 `artifact.json`（含源码提交及协议版本），输出到 `artifacts/releases/v0.2.0/`。不要分发测试用的 `toolbar-component.exe`。

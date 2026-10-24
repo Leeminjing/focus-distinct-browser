@@ -10,27 +10,28 @@
 #include <winrt/Windows.Foundation.h>
 #include "json.h"
 #include "control.h"
+#include "window/native_toolbar.h"
+#include "host/pipe_output.h"
 #include <atomic>
-#include <condition_variable>
-#include <deque>
 #include <filesystem>
 #include <functional>
 #include <map>
 #include <memory>
-#include <mutex>
 #include <set>
 #include <thread>
 #include <vector>
 #include <algorithm>
 #include <utility>
 #include <cctype>
+#include <cwctype>
+#include <optional>
 
 using Microsoft::WRL::Callback;
 using Microsoft::WRL::ComPtr;
 using namespace distinct;
 namespace fs = std::filesystem;
 constexpr UINT input_message = WM_APP + 1, disconnected_message = WM_APP + 2;
-constexpr int takeover_button = 101, address_edit = 102, go_button = 103;
+constexpr UINT shortcut_message = WM_APP + 3, manual_navigation_message = WM_APP + 4;
 constexpr uint64_t operation_timeout = 20000, create_timeout = 45000;
 static uint64_t now() { return GetTickCount64(); }
 static std::string guid() {
@@ -48,57 +49,6 @@ static std::wstring canonical_uri(PCWSTR text) {
     return std::wstring(uri.c_str(), uri.size());
 }
 
-// Pipe backpressure must never block the window's UI thread. A failed writer
-// revokes the connection just like EOF on stdin. The bounded queue caps memory.
-class Output {
-    HANDLE pipe_;
-    HWND target_;
-    std::mutex mutex_;
-    std::condition_variable wake_;
-    std::deque<std::string> queue_;
-    size_t bytes_ = 0;
-    bool stopped_ = false;
-    std::thread thread_;
-public:
-    Output(HANDLE pipe, HWND target) : pipe_(pipe), target_(target), thread_([this] { run(); }) {}
-    ~Output() {
-        { std::lock_guard<std::mutex> lock(mutex_); stopped_ = true; }
-        wake_.notify_one();
-        while (WaitForSingleObject(thread_.native_handle(), 50) == WAIT_TIMEOUT)
-            CancelSynchronousIo(thread_.native_handle());
-        thread_.join();
-    }
-    void send(const Json& value) {
-        auto line = winrt::to_string(value.Stringify()) + "\n";
-        std::lock_guard<std::mutex> lock(mutex_);
-        if (stopped_) return;
-        if (bytes_ + line.size() > 64 * 1024 * 1024) {
-            stopped_ = true; PostMessage(target_, disconnected_message, 0, 0);
-        } else { bytes_ += line.size(); queue_.push_back(std::move(line)); }
-        wake_.notify_one();
-    }
-private:
-    void run() {
-        for (;;) {
-            std::string line;
-            {
-                std::unique_lock<std::mutex> lock(mutex_);
-                wake_.wait(lock, [this] { return stopped_ || !queue_.empty(); });
-                if (stopped_) return;
-                line = std::move(queue_.front()); queue_.pop_front(); bytes_ -= line.size();
-            }
-            size_t offset = 0;
-            while (offset < line.size()) {
-                DWORD written = 0;
-                if (!WriteFile(pipe_, line.data() + offset, static_cast<DWORD>(line.size() - offset), &written, nullptr) || !written) {
-                    { std::lock_guard<std::mutex> lock(mutex_); stopped_ = true; }
-                    PostMessage(target_, disconnected_message, 0, 0); return;
-                }
-                offset += written;
-            }
-        }
-    }
-};
 struct Host;
 struct Operation {
     std::string request, token, kind;
@@ -113,8 +63,10 @@ struct Browser : std::enable_shared_from_this<Browser> {
     std::string id, label, creation;
     uint64_t created = now(), revision = 0, navigation_id = 0;
     fs::path profile;
-    HWND window = nullptr, name = nullptr, address = nullptr, status = nullptr, button = nullptr, go = nullptr;
-    HFONT font = nullptr;
+    HWND window = nullptr;
+    std::unique_ptr<NativeToolbar> toolbar;
+    std::optional<ShellCommand> pending_manual;
+    std::wstring pending_address, notice;
     ComPtr<ICoreWebView2Environment> environment;
     ComPtr<ICoreWebView2Controller> controller;
     ComPtr<ICoreWebView2> view;
@@ -124,10 +76,12 @@ struct Browser : std::enable_shared_from_this<Browser> {
     double viewport_width = 0, viewport_height = 0;
     void layout();
     void refresh();
+    void user_command(ShellCommand command);
+    void drain_manual();
 };
 struct Host {
     HWND dispatcher = nullptr;
-    std::unique_ptr<Output> output;
+    std::unique_ptr<PipeOutput> output;
     std::map<std::string, std::shared_ptr<Browser>> browsers;
     std::set<std::string> pending;
     bool connected = true;
@@ -170,6 +124,7 @@ struct Host {
         }
         b->refresh();
         if (b->control.mode == Mode::manual) event(b, "control_changed");
+        if (b->pending_manual && !b->closing) PostMessage(b->window, manual_navigation_message, 0, 0);
     }
     std::string gate(const std::shared_ptr<Browser>& b, const std::shared_ptr<Operation>& op) {
         if (op->done || b->closing) return "browser_closed";
@@ -246,37 +201,81 @@ struct Host {
 void Browser::layout() {
     if (!window) return;
     RECT bounds{}; GetClientRect(window, &bounds);
-    // All control dimensions scale from DIPs, including fractional DPI values.
-    const auto px = [this](int dip) { return MulDiv(dip, static_cast<int>(GetDpiForWindow(window)), 96); };
-    int width = bounds.right;
-    MoveWindow(name, px(12), px(8), std::max(0, width - px(24)), px(22), TRUE);
-    MoveWindow(address, px(12), px(36), std::max(0, width - px(90)), px(28), TRUE);
-    MoveWindow(go, std::max(px(12), width - px(66)), px(36), px(54), px(28), TRUE);
-    MoveWindow(status, px(12), px(76), std::max(0, width - px(126)), px(25), TRUE);
-    MoveWindow(button, std::max(px(12), width - px(110)), px(72), px(98), px(30), TRUE);
+    if (toolbar) toolbar->layout();
     if (controller) {
-        bounds.top = std::min(bounds.bottom, static_cast<LONG>(px(112)));
+        int height = toolbar ? toolbar->height_pixels() : MulDiv(NativeToolbar::height_dip, static_cast<int>(GetDpiForWindow(window)), 96);
+        bounds.top = std::min(bounds.bottom, static_cast<LONG>(height));
         controller->put_Bounds(bounds);
         controller->put_IsVisible(IsWindowVisible(window) && !IsIconic(window));
     }
 }
 void Browser::refresh() {
-    if (!window || closing) return;
-    std::wstring text;
-    switch (control.mode) {
-    case Mode::available: text = control.busy ? L"等待已发操作收尾" : L"可申请自动控制"; break;
-    case Mode::automatic: text = L"自动控制 · "; text += winrt::to_hstring(control.owner).c_str(); break;
-    case Mode::taking_over: text = L"接管中 · 等待已发操作收尾"; break;
-    case Mode::manual: text = L"人工控制"; break;
-    case Mode::paused: text = L"已暂停 · 展示后点击交还"; break;
-    case Mode::faulted: text = L"故障 · 请关闭此浏览器"; break;
-    case Mode::closed: text = L"已关闭"; break;
+    if (!window || closing || !toolbar) return;
+    ShellState state;
+    state.mode = control.mode; state.ready = ready; state.connected = host->connected;
+    state.busy = control.busy; state.loading = navigating; state.notice = notice;
+    if (view) {
+        BOOL back = FALSE, forward = FALSE;
+        view->get_CanGoBack(&back); view->get_CanGoForward(&forward);
+        state.can_back = back != FALSE; state.can_forward = forward != FALSE;
     }
-    if (!host->connected) text = L"连接已断开 · 人工控制";
-    SetWindowText(status, text.c_str());
-    bool handback = control.mode == Mode::manual || control.mode == Mode::paused;
-    SetWindowText(button, handback ? L"交还" : L"接管");
-    EnableWindow(button, host->connected && control.mode != Mode::faulted && control.mode != Mode::taking_over);
+    toolbar->update(state);
+}
+void Browser::user_command(ShellCommand command) {
+    if (closing || !ready || control.mode == Mode::faulted) return;
+    auto self = shared_from_this();
+    if (command == ShellCommand::takeover) {
+        if (control.mode == Mode::manual || control.mode == Mode::paused) {
+            if (host->connected && IsWindowVisible(window) && !IsIconic(window) && control.hand_back().empty()) {
+                notice.clear(); refresh(); host->event(self, "control_changed", object({{L"reason", js("hand_back")}}));
+            }
+        } else if (control.mode == Mode::automatic || control.mode == Mode::available)
+            host->revoke(self, Mode::manual, "takeover");
+        return;
+    }
+    if (command == ShellCommand::focus_page) {
+        controller->MoveFocus(COREWEBVIEW2_MOVE_FOCUS_REASON_PROGRAMMATIC); return;
+    }
+    // Human intent revokes the lease before touching the page. A single manual
+    // navigation waits for issued commands to settle; it is never an auto queue.
+    host->revoke(self, Mode::manual, command == ShellCommand::address_focus ? "address_focus" : "manual_navigation");
+    notice.clear();
+    if (command == ShellCommand::address_focus) { refresh(); return; }
+    if (command == ShellCommand::reload_stop && navigating) {
+        pending_manual.reset();
+        if (FAILED(view->Stop())) { notice = L"无法停止加载"; refresh(); }
+        return;
+    }
+    if (command == ShellCommand::navigate) {
+        pending_address = toolbar->input_url();
+        auto first = pending_address.find_first_not_of(L" \t\r\n");
+        if (first == std::wstring::npos) { notice = L"请输入地址"; refresh(); return; }
+        pending_address = pending_address.substr(first, pending_address.find_last_not_of(L" \t\r\n") - first + 1);
+        if (pending_address.find(L":") == std::wstring::npos) pending_address = L"https://" + pending_address;
+        else if (pending_address.rfind(L"localhost:", 0) == 0 || iswdigit(pending_address[0])) pending_address = L"http://" + pending_address;
+        auto scheme = pending_address.substr(0, pending_address.find(L':'));
+        std::transform(scheme.begin(), scheme.end(), scheme.begin(), towlower);
+        if (scheme != L"http" && scheme != L"https" && scheme != L"about" && scheme != L"file") {
+            notice = L"地址格式不支持"; refresh(); return;
+        }
+    }
+    pending_manual = command;
+    if (active) {
+        if (active->kind == "navigate") view->Stop();
+    } else drain_manual();
+}
+void Browser::drain_manual() {
+    if (!pending_manual || control.busy) return;
+    auto command = *pending_manual; pending_manual.reset();
+    if (closing || !ready || control.mode != Mode::manual || !IsWindowVisible(window) || IsIconic(window)) return;
+    HRESULT hr = S_OK;
+    if (command == ShellCommand::navigate) hr = view->Navigate(pending_address.c_str());
+    else if (command == ShellCommand::back) hr = view->GoBack();
+    else if (command == ShellCommand::forward) hr = view->GoForward();
+    else if (command == ShellCommand::reload_stop || command == ShellCommand::reload) hr = view->Reload();
+    if (FAILED(hr)) notice = L"无法打开页面";
+    else controller->MoveFocus(COREWEBVIEW2_MOVE_FOCUS_REASON_PROGRAMMATIC);
+    refresh();
 }
 
 static LRESULT CALLBACK BrowserProc(HWND window, UINT message, WPARAM wparam, LPARAM lparam) {
@@ -288,7 +287,25 @@ static LRESULT CALLBACK BrowserProc(HWND window, UINT message, WPARAM wparam, LP
     }
     if (!b) return DefWindowProc(window, message, wparam, lparam);
     try {
+        LRESULT result = 0;
+        if (b->toolbar && b->toolbar->parent_message(message, wparam, lparam, result)) return result;
         switch (message) {
+        case WM_GETMINMAXINFO: {
+            auto limits = reinterpret_cast<MINMAXINFO*>(lparam);
+            UINT dpi = GetDpiForWindow(window);
+            limits->ptMinTrackSize = {MulDiv(560, dpi, 96), MulDiv(360, dpi, 96)};
+            return 0;
+        }
+        case WM_THEMECHANGED: case WM_SETTINGCHANGE: case WM_SYSCOLORCHANGE:
+            if (b->toolbar) b->toolbar->theme_changed();
+            return 0;
+        case shortcut_message:
+            if (b->toolbar) b->toolbar->shortcut(static_cast<UINT>(wparam), (lparam & 1) != 0, (lparam & 2) != 0);
+            return 0;
+        case manual_navigation_message: b->drain_manual(); return 0;
+        case WM_MOVE:
+            if (b->controller) b->controller->NotifyParentWindowPositionChanged();
+            break;
         case WM_SIZE:
             if (wparam == SIZE_MINIMIZED && !b->closing)
                 b->host->revoke(b->shared_from_this(), Mode::paused, "minimized");
@@ -302,32 +319,11 @@ static LRESULT CALLBACK BrowserProc(HWND window, UINT message, WPARAM wparam, LP
             SetWindowPos(window, nullptr, rect->left, rect->top, rect->right - rect->left, rect->bottom - rect->top, SWP_NOZORDER | SWP_NOACTIVATE);
             b->layout(); return 0;
         }
-        case WM_COMMAND:
-            if (LOWORD(wparam) == takeover_button && HIWORD(wparam) == BN_CLICKED) {
-                auto shared = b->shared_from_this();
-                if (b->control.mode == Mode::manual || b->control.mode == Mode::paused) {
-                    if (b->host->connected && IsWindowVisible(window) && !IsIconic(window) && b->control.hand_back().empty()) {
-                        b->refresh(); b->host->event(shared, "control_changed", object({{L"reason", js("hand_back")}}));
-                    }
-                } else if (b->control.mode == Mode::automatic || b->control.mode == Mode::available)
-                    b->host->revoke(shared, Mode::manual, "takeover");
-                return 0;
-            }
-            if (LOWORD(wparam) == go_button && b->view && !b->control.busy && b->control.mode != Mode::faulted) {
-                b->host->revoke(b->shared_from_this(), Mode::manual, "manual_navigation");
-                int length = GetWindowTextLength(b->address);
-                std::wstring url(static_cast<size_t>(length) + 1, L'\0');
-                GetWindowText(b->address, url.data(), length + 1); url.resize(length);
-                if (!url.empty()) b->view->Navigate(url.c_str());
-                return 0;
-            }
-            break;
         case WM_CLOSE: {
             auto keep_alive = b->shared_from_this();
             b->host->close(keep_alive, "user_closed"); return 0;
         }
         case WM_NCDESTROY:
-            if (b->font) { DeleteObject(b->font); b->font = nullptr; }
             SetWindowLongPtr(window, GWLP_USERDATA, 0); break;
         }
     } catch (...) { OutputDebugString(L"distinct-browser: window callback failed\n"); }
@@ -344,22 +340,15 @@ void Host::create(const std::string& request, const std::string& label) {
     auto b = std::make_shared<Browser>(); b->host = this; b->id = guid(); b->label = label; b->creation = request;
     browsers.emplace(b->id, b);
     auto title = winrt::to_hstring(label + " | Distinct Browser");
-    b->window = CreateWindowEx(0, L"DistinctBrowserWindow", title.c_str(), WS_OVERLAPPEDWINDOW,
+    b->window = CreateWindowEx(0, L"DistinctBrowserWindow", title.c_str(), WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN,
         CW_USEDEFAULT, CW_USEDEFAULT, 1000, 760, nullptr, nullptr, GetModuleHandle(nullptr), b.get());
     if (!b->window) { close(b, "CreateWindowEx failed"); return; }
-    auto control = [&](const wchar_t* type, const wchar_t* text, DWORD style, int id) {
-        return CreateWindowEx(type == std::wstring(L"EDIT") ? WS_EX_CLIENTEDGE : 0, type, text,
-            WS_CHILD | WS_VISIBLE | style, 0, 0, 0, 0, b->window, reinterpret_cast<HMENU>(static_cast<INT_PTR>(id)), GetModuleHandle(nullptr), nullptr);
-    };
-    b->name = control(L"STATIC", winrt::to_hstring(label).c_str(), SS_LEFT, 0);
-    b->address = control(L"EDIT", L"about:blank", ES_AUTOHSCROLL | WS_TABSTOP, address_edit);
-    b->go = control(L"BUTTON", L"打开", BS_PUSHBUTTON | WS_TABSTOP, go_button);
-    b->status = control(L"STATIC", L"正在初始化网页…", SS_LEFT, 0);
-    b->button = control(L"BUTTON", L"接管", BS_PUSHBUTTON | WS_TABSTOP, takeover_button);
-    b->font = CreateFont(-MulDiv(14, static_cast<int>(GetDpiForWindow(b->window)), 96), 0, 0, 0,
-        FW_NORMAL, FALSE, FALSE, FALSE, DEFAULT_CHARSET, 0, 0, CLEARTYPE_QUALITY, 0, L"Microsoft YaHei UI");
-    for (HWND item : {b->name, b->address, b->go, b->status, b->button}) SendMessage(item, WM_SETFONT, reinterpret_cast<WPARAM>(b->font), TRUE);
-    SendMessage(b->address, EM_SETLIMITTEXT, 8192, 0);
+    b->toolbar = std::make_unique<NativeToolbar>();
+    std::weak_ptr<Browser> weak = b;
+    hr = b->toolbar->create(b->window, [weak](ShellCommand command) {
+        if (auto b = weak.lock()) b->user_command(command);
+    });
+    if (FAILED(hr)) { close(b, "Native toolbar initialization failed"); return; }
     ShowWindow(b->window, SW_SHOWNOACTIVATE); b->layout();
     b->profile = data_root / winrt::to_hstring(b->id).c_str();
     hr = CreateCoreWebView2EnvironmentWithOptions(nullptr, b->profile.c_str(), options.Get(),
@@ -402,10 +391,26 @@ void Host::create(const std::string& request, const std::string& label) {
 void Host::initialize(const std::shared_ptr<Browser>& b) {
     std::weak_ptr<Browser> weak = b;
     EventRegistrationToken registration{};
+    checked(b->controller->add_AcceleratorKeyPressed(Callback<ICoreWebView2AcceleratorKeyPressedEventHandler>(
+        [weak](ICoreWebView2Controller*, ICoreWebView2AcceleratorKeyPressedEventArgs* args) -> HRESULT {
+            auto b = weak.lock(); if (!b || b->closing) return S_OK;
+            COREWEBVIEW2_KEY_EVENT_KIND kind{}; args->get_KeyEventKind(&kind);
+            if (kind != COREWEBVIEW2_KEY_EVENT_KIND_KEY_DOWN && kind != COREWEBVIEW2_KEY_EVENT_KIND_SYSTEM_KEY_DOWN) return S_OK;
+            UINT key = 0; args->get_VirtualKey(&key);
+            bool ctrl = GetKeyState(VK_CONTROL) < 0, alt = GetKeyState(VK_MENU) < 0;
+            if ((ctrl && (key == 'L' || key == 'R')) || (alt && (key == 'D' || key == VK_LEFT || key == VK_RIGHT)) ||
+                key == VK_F5 || (key == VK_ESCAPE && b->navigating)) {
+                args->put_Handled(TRUE);
+                COREWEBVIEW2_PHYSICAL_KEY_STATUS status{}; args->get_PhysicalKeyStatus(&status);
+                if (!status.WasKeyDown) PostMessage(b->window, shortcut_message, key, (ctrl ? 1 : 0) | (alt ? 2 : 0));
+            }
+            return S_OK;
+        }).Get(), &registration), "AcceleratorKeyPressed");
     checked(b->view->add_NavigationStarting(Callback<ICoreWebView2NavigationStartingEventHandler>(
         [this, weak](ICoreWebView2*, ICoreWebView2NavigationStartingEventArgs* args) -> HRESULT {
             if (auto b = weak.lock(); b && !b->closing) {
                 b->navigating = true; ++b->revision; b->control.observed = false;
+                b->notice.clear();
                 args->get_NavigationId(&b->navigation_id);
                 auto op = b->active;
                 if (op && op->kind == "navigate") {
@@ -422,6 +427,7 @@ void Host::initialize(const std::shared_ptr<Browser>& b) {
                     else if (op->navigation_id != b->navigation_id)
                         finish(b, op, "navigation_superseded", "A new document navigation replaced the requested navigation");
                 }
+                b->refresh();
             }
             return S_OK;
         }).Get(), &registration), "NavigationStarting");
@@ -458,6 +464,12 @@ void Host::initialize(const std::shared_ptr<Browser>& b) {
                 }
             }
             if (latest) event(b, "navigation_completed", object({{L"success", jb(ok != FALSE)}, {L"same_document", jb(false)}}));
+            if (latest && !ok && !op) {
+                COREWEBVIEW2_WEB_ERROR_STATUS status{}; args->get_WebErrorStatus(&status);
+                if (status != COREWEBVIEW2_WEB_ERROR_STATUS_OPERATION_CANCELED && status != COREWEBVIEW2_WEB_ERROR_STATUS_CONNECTION_ABORTED)
+                    b->notice = L"加载未完成";
+            }
+            b->refresh();
             return S_OK;
         }).Get(), &registration), "NavigationCompleted");
     checked(b->view->add_SourceChanged(Callback<ICoreWebView2SourceChangedEventHandler>(
@@ -466,7 +478,7 @@ void Host::initialize(const std::shared_ptr<Browser>& b) {
                 b->control.observed = false; ++b->revision;
                 LPWSTR source = nullptr;
                 if (SUCCEEDED(view->get_Source(&source))) {
-                    SetWindowText(b->address, source);
+                    if (b->toolbar) b->toolbar->set_url(source);
                     CoTaskMemFree(source);
                     BOOL new_document = TRUE; args->get_IsNewDocument(&new_document);
                     // Fragment navigation has no NavigationStarting/Completed.
@@ -481,9 +493,11 @@ void Host::initialize(const std::shared_ptr<Browser>& b) {
             // Repeating the current fragment can change history without a
             // SourceChanged event. A same-URL full document reload must still
             // wait for its NavigationStarting/Completed sequence.
-            if (auto b = weak.lock(); b && !b->closing && b->active &&
-                b->active->navigation_target.find(L'#') != std::wstring::npos)
-                finish_same_document_navigation(b);
+            if (auto b = weak.lock(); b && !b->closing) {
+                if (b->active && b->active->navigation_target.find(L'#') != std::wstring::npos)
+                    finish_same_document_navigation(b);
+                b->refresh();
+            }
             return S_OK;
         }).Get(), &registration), "HistoryChanged");
     checked(b->view->add_NewWindowRequested(Callback<ICoreWebView2NewWindowRequestedEventHandler>(
@@ -759,6 +773,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
         host.data_root = fs::path(local) / L"DistinctBrowser" / L"Profiles";
         CoTaskMemFree(local); fs::create_directories(host.data_root);
         WNDCLASS window_class{}; window_class.lpfnWndProc = BrowserProc; window_class.hInstance = instance;
+        window_class.hIcon = LoadIcon(instance, MAKEINTRESOURCE(2));
         window_class.hCursor = LoadCursor(nullptr, IDC_ARROW); window_class.hbrBackground = reinterpret_cast<HBRUSH>(COLOR_WINDOW + 1);
         window_class.lpszClassName = L"DistinctBrowserWindow";
         if (!RegisterClass(&window_class)) throw Error("startup_failed", "Cannot register browser class");
@@ -767,7 +782,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
         if (!RegisterClass(&dispatch_class)) throw Error("startup_failed", "Cannot register dispatcher class");
         host.dispatcher = CreateWindowEx(0, dispatch_class.lpszClassName, L"", 0, 0, 0, 0, 0, HWND_MESSAGE, nullptr, instance, &host);
         if (!host.dispatcher) throw Error("startup_failed", "Cannot create dispatcher");
-        host.output = std::make_unique<Output>(output, host.dispatcher);
+        host.output = std::make_unique<PipeOutput>(output, [dispatcher = host.dispatcher] { PostMessage(dispatcher, disconnected_message, 0, 0); });
         SetTimer(host.dispatcher, 1, 200, nullptr);
         host.send(object({{L"event", js("ready")}, {L"protocol_version", jn(1)}, {L"pid", jn(GetCurrentProcessId())}}));
         std::atomic<bool> stopping = false;
@@ -802,7 +817,16 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
             PostMessage(dispatcher, disconnected_message, 0, 0);
         });
         MSG message{};
-        while (GetMessage(&message, nullptr, 0, 0) > 0) { TranslateMessage(&message); DispatchMessage(&message); }
+        while (GetMessage(&message, nullptr, 0, 0) > 0) {
+            bool handled = false;
+            if (message.message == WM_KEYDOWN || message.message == WM_SYSKEYDOWN) {
+                HWND root = GetAncestor(message.hwnd, GA_ROOT);
+                for (auto& [id, browser] : host.browsers) {
+                    if (browser->window == root && browser->toolbar && browser->toolbar->pre_translate(message)) { handled = true; break; }
+                }
+            }
+            if (!handled) { TranslateMessage(&message); DispatchMessage(&message); }
+        }
         stopping = true;
         while (WaitForSingleObject(reader.native_handle(), 50) == WAIT_TIMEOUT)
             CancelSynchronousIo(reader.native_handle());

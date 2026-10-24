@@ -10,6 +10,10 @@ try {
     if ($LASTEXITCODE) { throw 'Integration tests failed' }
     & python tests/navigation.py $Executable
     if ($LASTEXITCODE) { throw 'Navigation regression tests failed' }
+    & python tests/shell.py $Executable
+    if ($LASTEXITCODE) { throw 'Native shell tests failed' }
+    & python tests/toolbar_component.py (Join-Path (Split-Path $Executable -Parent) 'toolbar-component.exe')
+    if ($LASTEXITCODE) { throw 'Toolbar theme/DPI tests failed' }
     & python tests/protocol.py $Executable
     if ($LASTEXITCODE) { throw 'Protocol tests failed' }
     & python tests/failures.py $Executable

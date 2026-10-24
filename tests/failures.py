@@ -10,6 +10,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "demo"))
 from client import Client, BrowserError
 from fixture import Fixture
+from native_ui import text, snapshot, user32 as ui
 
 EXE = Path(sys.argv[1]) if len(sys.argv) > 1 else ROOT / "build/distinct-browser.exe"
 user32 = ctypes.WinDLL("user32")
@@ -77,6 +78,8 @@ def run():
         finally:
             kernel32.CloseHandle(handle)
         wait_event(client, "faulted", browser)
+        assert "故障" in text(ui.GetDlgItem(int(made["hwnd"]), 107))
+        snapshot(int(made["hwnd"]), ROOT / "artifacts" / "v0.2-faulted.png")
         error("invalid_token", lambda: client.call("observe", **params))
         user32.ShowWindow(int(made["hwnd"]), 6)
         assert client.call("present", browser_id=browser)["state"] == "faulted"

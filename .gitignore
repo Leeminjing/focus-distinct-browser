@@ -1,0 +1,7 @@
+/.deps/
+/.tools/
+/build/
+/artifacts/
+__pycache__/
+*.user
+/*-output.log

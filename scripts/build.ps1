@@ -1,0 +1,62 @@
+param(
+    [string]$MsvcRoot,
+    [string]$WindowsSdkRoot,
+    [switch]$SkipTests
+)
+$ErrorActionPreference = 'Stop'
+$projectRoot = Split-Path $PSScriptRoot -Parent
+Push-Location $projectRoot
+try {
+    # An existing x64 developer shell takes precedence. Otherwise locate VS or
+    # an unpacked compiler; never install machine-wide components implicitly.
+    if (-not (Get-Command cl.exe -ErrorAction SilentlyContinue)) {
+        if (-not $MsvcRoot) {
+            $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+            if (Test-Path $vswhere) {
+                $vs = & $vswhere -latest -products '*' -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+                if ($vs) { $MsvcRoot = Join-Path $vs 'VC\Tools\MSVC' }
+            }
+            if (-not $MsvcRoot) { $MsvcRoot = Join-Path $projectRoot '.tools\msvc\VC\Tools\MSVC' }
+        }
+        if (-not (Test-Path (Join-Path $MsvcRoot 'include'))) {
+            $MsvcRoot = (Get-ChildItem $MsvcRoot -Directory | Sort-Object Name -Descending | Select-Object -First 1).FullName
+        }
+        if (-not $MsvcRoot) { throw 'Install the MSVC C++ build tools, or pass -MsvcRoot.' }
+        if (-not $WindowsSdkRoot) {
+            $registry = Get-ItemProperty 'HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows Kits\Installed Roots' -ErrorAction SilentlyContinue
+            $WindowsSdkRoot = $registry.KitsRoot10
+        }
+        if (-not $WindowsSdkRoot) { throw 'Pass -WindowsSdkRoot with the Windows SDK 10/11 directory.' }
+        $sdkVersion = (Get-ChildItem (Join-Path $WindowsSdkRoot 'Include') -Directory | Sort-Object Name -Descending | Select-Object -First 1).Name
+        $env:PATH = "$MsvcRoot\bin\Hostx64\x64;$WindowsSdkRoot\bin\$sdkVersion\x64;$env:PATH"
+        $env:INCLUDE = "$MsvcRoot\include;$WindowsSdkRoot\Include\$sdkVersion\ucrt;$WindowsSdkRoot\Include\$sdkVersion\shared;$WindowsSdkRoot\Include\$sdkVersion\um;$WindowsSdkRoot\Include\$sdkVersion\winrt;$WindowsSdkRoot\Include\$sdkVersion\cppwinrt"
+        $env:LIB = "$MsvcRoot\lib\x64;$WindowsSdkRoot\Lib\$sdkVersion\ucrt\x64;$WindowsSdkRoot\Lib\$sdkVersion\um\x64"
+    }
+    $sdkRoot = Join-Path $projectRoot '.deps\webview2'
+    $version = '1.0.3650.58'
+    if (-not (Test-Path "$sdkRoot\build\native\include\WebView2.h")) {
+        New-Item -ItemType Directory -Force .deps | Out-Null
+        Invoke-WebRequest "https://api.nuget.org/v3-flatcontainer/microsoft.web.webview2/$version/microsoft.web.webview2.$version.nupkg" -OutFile .deps/webview2.zip
+        $hash = (Get-FileHash .deps/webview2.zip -Algorithm SHA256).Hash
+        if ($hash -ne '911A472128C82AC8BAA0C486C23342CC9DD6E7DC50D754E676726642CA065C60') { throw 'WebView2 SDK checksum mismatch' }
+        Expand-Archive .deps/webview2.zip $sdkRoot -Force
+    }
+    New-Item -ItemType Directory -Force build | Out-Null
+    & rc.exe /nologo /I src /fo build/app.res src/app.rc
+    if ($LASTEXITCODE) { throw 'Resource compilation failed' }
+    $arguments = @('/nologo', '/std:c++17', '/O2', '/MT', '/EHsc', '/W4', '/utf-8', '/permissive-',
+        '/DUNICODE', '/D_UNICODE', '/DNOMINMAX', '/DWIN32_LEAN_AND_MEAN', "/I$sdkRoot\build\native\include",
+        '/Fobuild/', '/Febuild/distinct-browser.exe', 'src/main.cpp', 'build/app.res',
+        '/link', '/SUBSYSTEM:WINDOWS', '/DYNAMICBASE', '/NXCOMPAT',
+        "$sdkRoot\build\native\x64\WebView2LoaderStatic.lib", 'user32.lib', 'gdi32.lib', 'ole32.lib',
+        'oleaut32.lib', 'shlwapi.lib', 'shell32.lib', 'version.lib', 'windowsapp.lib', 'crypt32.lib')
+    & cl.exe @arguments
+    if ($LASTEXITCODE) { throw 'C++ compilation failed' }
+    if (-not $SkipTests) {
+        & cl.exe /nologo /std:c++17 /O2 /MT /EHsc /W4 /utf-8 /Fobuild/ /Febuild/control-tests.exe tests/control_tests.cpp
+        if ($LASTEXITCODE) { throw 'Control test compilation failed' }
+        & ./build/control-tests.exe
+        if ($LASTEXITCODE) { throw 'Control tests failed' }
+    }
+    Write-Host "Built $projectRoot\build\distinct-browser.exe"
+} finally { Pop-Location }

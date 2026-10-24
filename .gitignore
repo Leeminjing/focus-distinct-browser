@@ -5,3 +5,7 @@
 __pycache__/
 *.user
 /*-output.log
+
+# Local planning documents are never committed.
+/docs/v*-spec.md
+/docs/v*-design.md

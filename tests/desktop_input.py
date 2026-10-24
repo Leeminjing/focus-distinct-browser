@@ -309,7 +309,7 @@ def run(executable):
                 "windows_build":sys.getwindowsversion().build,"webview2_runtime":runtime,"dpi":user32.GetDpiForWindow(hwnd),
                 "executable_sha256":hashlib.sha256(Path(executable).read_bytes()).hexdigest(),"passed":results,
                 "manual_pending":["physical keyboard/mouse","real IME composition and candidate UI","touch/pen","cross-monitor DPI"],
-                "keyboard_guard":"WH_KEYBOARD_LL, filtered by this process's foreground window and page focus"}
+                "keyboard_guard":"WH_KEYBOARD_LL on dedicated message thread; foreground window/page focus filtered; atomic dispatch fence"}
         destination=ROOT/"artifacts"/"desktop-validation.json"
         destination.parent.mkdir(parents=True,exist_ok=True)
         destination.write_text(json.dumps(report,ensure_ascii=False,indent=2)+"\n",encoding="utf-8")

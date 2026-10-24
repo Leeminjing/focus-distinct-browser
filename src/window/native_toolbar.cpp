@@ -192,10 +192,6 @@ void NativeToolbar::focus_from_page(bool previous) {
         if (IsWindowEnabled(order[index])) { SetFocus(order[index]); return; }
     }
 }
-bool NativeToolbar::page_shortcut(UINT key, bool ctrl, bool alt) const {
-    return (ctrl && (key == 'L' || key == 'R')) || (alt && (key == 'D' || key == VK_LEFT || key == VK_RIGHT)) ||
-        key == VK_F5 || (key == VK_ESCAPE && state_.loading);
-}
 bool NativeToolbar::shortcut(UINT key, bool ctrl, bool alt) {
     if ((ctrl && key == 'L') || (alt && key == 'D')) { focus_address(); return true; }
     if ((ctrl && key == 'R') || key == VK_F5) { callback_(ShellCommand::reload); return true; }

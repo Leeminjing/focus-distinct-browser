@@ -2,6 +2,10 @@
 #include <windows.h>
 
 namespace distinct {
+inline bool browser_shortcut(UINT key, bool ctrl, bool alt, bool loading) {
+    return (ctrl && (key == 'L' || key == 'R')) || (alt && (key == 'D' || key == VK_LEFT || key == VK_RIGHT)) ||
+        key == VK_F5 || (key == VK_ESCAPE && loading);
+}
 // Called only for messages targeting a browser's page HWND subtree, before
 // TranslateMessage/DispatchMessage. CDP does not enter this native input path.
 inline bool page_input_intent(const MSG& message) {

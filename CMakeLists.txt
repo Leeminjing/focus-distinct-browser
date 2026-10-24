@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.24)
-project(distinct_browser VERSION 0.3.1 LANGUAGES CXX)
+project(distinct_browser VERSION 0.3.2 LANGUAGES CXX)
 if(NOT WIN32 OR NOT MSVC)
   message(FATAL_ERROR "Requires Windows and MSVC (x64).")
 endif()

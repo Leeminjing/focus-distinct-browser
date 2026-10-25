@@ -23,7 +23,7 @@ def main():
             print('Endpoint:', options.endpoint)
         connection = ReconnectClient(options.endpoint, options.executable)
         if process:
-            browser = connection.call('create', label='Session recovery prototype')
+            browser = connection.call('create', label='Session recovery')
             token = connection.call('acquire', browser_id=browser['browser_id'], client_id='demo')['token']
             connection.call('observe', browser_id=browser['browser_id'], token=token)
             connection.call('act', browser_id=browser['browser_id'], token=token, action={'type': 'navigate', 'url': options.url})

@@ -31,5 +31,6 @@ int main() {
             return EXIT_FAILURE;
         }
     }
-    std::cout << "page input intent tests passed (33 cases)\n";
+    if (!distinct::browser_shortcut('J', true, false, false) || distinct::browser_shortcut('J', false, false, false)) return EXIT_FAILURE;
+    std::cout << "page input intent tests passed (33 cases and download shortcut)\n";
 }

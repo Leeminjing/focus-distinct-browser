@@ -35,6 +35,7 @@
 | `list_pages` | `browser_id` | 返回 `selected_page_id` 和 `pages` 列表；不需要租约，每项含 `page_id`、`opener_page_id`、`url`、`title`、`hwnd`、`ready`、`loading` |
 | `select_page` | `browser_id`, `token`, `page_id` | 选择并展示已有页面，返回 `page_id`、`foreground`；清除旧观察，不重新加载 |
 | `close_page` | `browser_id`, `token`, `page_id` | 关闭一个页面；关闭当前页时选择最近使用的存活页；关闭最后一页使浏览器标识失效 |
+| `list_downloads` | `browser_id` | 只读查询，无需租约；返回 `downloads` 列表和浏览器级 `interaction_pending` |
 
 `label` 最多 256 字节，`client_id` 最多 128 字节，均为非空字符串且不能含 NUL。`token` 为不透明的持有者凭据，每次取得控制都会生成新令牌。租约默认 30,000 ms，允许 1,000–300,000 ms；宿主使用单调时钟，并在实际派发前检查到期。
 
@@ -55,6 +56,8 @@
 最小化或隐藏任何页面会暂停该浏览器的自动操作；所有剩余页面恢复可见后才能交还。可通过不需要租约的 `present(browser_id, page_id)` 逐一恢复后台暂停页。展示另一页同样清除旧观察，不授予或撤销租约。遮挡或切换其他应用不暂停。断连保留所有已初始化页面供人工查看，最后一个窗口关闭才退出宿主。
 
 ### 观察
+
+v0.5 的观察结果增加 `site_interactions`，包含当前页的 `downloads`、`permissions` 记录，以及浏览器级 `interaction_pending`。这些是查询时的状态，不保证与截图原子一致。旧客户端可忽略该字段；协议版本仍为 1。
 
 ```json
 {"id":"3","method":"observe","params":{"browser_id":"...","token":"..."}}
@@ -95,6 +98,16 @@
 对于多步动作，接管发生后不再派发剩余步骤，因此可能只有按下已发生；宿主不会声称已经撤回这些效果。失败详情含 `dispatched_steps`、`completed_steps`、`result_unknown`；已经派发过的操作不能据此假定没有产生效果。
 
 ## 控制状态与事件
+
+### 下载与网站权限（v0.5）
+
+下载开始或支持的网站权限请求会撤销所属浏览器的租约，`control_changed.detail.reason` 分别为 `download_started`、`permission_requested`。在途动作如实收尾，未派发步骤停止。下载 / 权限仍待处理时，“交还”不会开放租约；结束后仍保持人工控制，必须显式交还、取得新令牌并重新观察。宿主不会自动恢复点击、导航或下载。
+
+`download_changed.detail` 包含 `download_id`、原始 `page_id`、`url`、绝对保存 `path`、`state`、`reason`、`bytes_received`、`total_bytes`（未知为 -1）。状态为 `in_progress`、`completed`、`cancelled`、`interrupted`；进度事件最多每 250 ms 一次，终态立即发出。`list_downloads` 可在人工控制时读取相同记录。下载面板提供取消按钮，`Ctrl+J` 重新打开；没有执行文件或自动重试接口。每浏览器最多 4 笔在途下载，最近 32 条记录；同一页同一 URL 的在途重复请求被拒绝。`download_rejected` 提供 `reason`，重复时也包含现有 `download_id`。
+
+文件保存到系统 Downloads 下的 `Distinct Browser/<browser_id>/<download_id>/download-<清理后的文件名>`，不覆盖既有下载目录。连续 30 秒没有进展中断并报告 `no_progress_timeout`；用户取消报告 `human_cancel`，Runtime 中断保留数字原因。关闭来源页、断连或故障会取消该页下载；关闭下载面板仅隐藏面板。文件传输是独立于导航的结果：导航可能先返回 `navigation_failed`（Runtime `CONNECTION_ABORTED`，9），随后产生下载事件；若下载事件先到，导航可返回 `download_started:true`、`download_id`、`page_id`、`control_still_valid:false`。两种情况均应查询下载，不重放导航。
+
+`permission_requested`、`permission_resolved` 的 `detail` 包含 `request_id`、`page_id`、来源 `url`、`kind`、`state`、`reason`。状态为 `pending`、`allowed_once`、`denied`、`failed`。原生提示允许用户决定本次请求；不写入 Profile，不存在 RPC 授权方法。未知类型或不支持单次授权的 Runtime 拒绝；每浏览器最多 8 个待决请求，120 秒超时、来源导航 / 关闭、断连和故障均拒绝并只完成一次 Deferral。观察中最多保留最近 16 条权限记录。
 
 | state | 含义 |
 | --- | --- |

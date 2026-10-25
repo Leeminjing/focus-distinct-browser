@@ -14,6 +14,7 @@
 #include "window/address_input.h"
 #include "window/page_input.h"
 #include "window/keyboard_guard.h"
+#include "browser/site_interactions.h"
 #include "host/pipe_output.h"
 #include <atomic>
 #include <filesystem>
@@ -89,6 +90,8 @@ void Page::refresh() {
     ShellState state;
     state.mode = owner()->control.mode; state.ready = ready; state.connected = host->connected;
     state.busy = owner()->control.busy; state.loading = navigating; state.notice = notice;
+    if (state.notice.empty() && session->sites && (state.mode == Mode::manual || state.mode == Mode::taking_over || state.mode == Mode::paused))
+        state.notice = session->sites->notice(id);
     if (keyboard) keyboard->loading = navigating;
     if (view) {
         BOOL back = FALSE, forward = FALSE;
@@ -114,8 +117,17 @@ void Page::user_command(ShellCommand command) {
     sync_input();
     if (closing || !ready || owner()->control.mode == Mode::faulted) return;
     auto self = shared_from_this();
+    if (command == ShellCommand::downloads) {
+        host->revoke(self, Mode::manual, "downloads_opened");
+        if (owner()->sites) owner()->sites->show_downloads(self);
+        return;
+    }
     if (command == ShellCommand::takeover) {
         if (owner()->control.mode == Mode::manual || owner()->control.mode == Mode::paused) {
+            if (owner()->sites && owner()->sites->pending()) {
+                for (auto& [page_id, page] : owner()->pages) owner()->sites->show_pending(page);
+                owner()->refresh(); return;
+            }
             if (host->connected && owner()->visible() && owner()->control.hand_back().empty()) {
                 notice.clear(); owner()->refresh(); host->event(self, "control_changed", object({{L"reason", js("hand_back")}}));
                 controller->MoveFocus(COREWEBVIEW2_MOVE_FOCUS_REASON_PROGRAMMATIC);
@@ -209,6 +221,14 @@ LRESULT CALLBACK PageProc(HWND window, UINT message, WPARAM wparam, LPARAM lpara
             if (b->toolbar) b->toolbar->shortcut(static_cast<UINT>(wparam), (lparam & 1) != 0, (lparam & 2) != 0);
             return 0;
         case manual_navigation_message: b->drain_manual(); return 0;
+        case WM_APP + 8:
+            if (auto browser = b->owner(); browser && browser->sites && !b->closing)
+                browser->sites->show_pending(b->shared_from_this());
+            return 0;
+        case WM_APP + 9:
+            if (auto browser = b->owner(); browser && browser->sites && !b->closing)
+                browser->sites->show_downloads(b->shared_from_this());
+            return 0;
         case WM_MOVE:
             if (b->controller) b->controller->NotifyParentWindowPositionChanged();
             break;
@@ -237,6 +257,9 @@ LRESULT CALLBACK PageProc(HWND window, UINT message, WPARAM wparam, LPARAM lpara
 }
 
 void Host::initialize(const std::shared_ptr<Page>& b) {
+    auto browser = b->owner();
+    if (!browser->sites) browser->sites = std::make_shared<SiteInteractions>(this, browser);
+    browser->sites->attach(b);
     std::weak_ptr<Page> weak = b;
     EventRegistrationToken registration{};
     // Host input processing lets the normal message loop handle shortcuts
@@ -253,6 +276,7 @@ void Host::initialize(const std::shared_ptr<Page>& b) {
     checked(b->view->add_NavigationStarting(Callback<ICoreWebView2NavigationStartingEventHandler>(
         [this, weak](ICoreWebView2*, ICoreWebView2NavigationStartingEventArgs* args) -> HRESULT {
             if (auto b = weak.lock(); b && !b->closing) {
+                if (b->owner()->sites) b->owner()->sites->stop_page(b->id, "page_navigated", false);
                 b->navigating = true; b->invalidate();
                 b->notice.clear();
                 args->get_NavigationId(&b->navigation_id);
@@ -297,7 +321,7 @@ void Host::initialize(const std::shared_ptr<Page>& b) {
                     args->get_WebErrorStatus(&status);
                     bool cancelled = status == COREWEBVIEW2_WEB_ERROR_STATUS_OPERATION_CANCELED;
                     finish(b, op, cancelled ? "navigation_cancelled" : "navigation_failed",
-                        cancelled ? "Navigation was cancelled; inspect the current page" : "Navigation did not complete successfully; inspect the current page",
+                        cancelled ? "Navigation was cancelled; inspect the current page" : "Navigation did not complete successfully; inspect the current page and downloads before deciding the next action",
                         object({{L"web_error_status", jn(status)}}));
                 }
             }
@@ -422,7 +446,8 @@ void Host::observe(const std::shared_ptr<Page>& b, const std::shared_ptr<Operati
                             b->owner()->control.observed = true;
                             finish(b, op, "", "", object({{L"page_id", js(b->id)}, {L"url", js(source)}, {L"title", js(caption)},
                                 {L"viewport", object({{L"width", jn(width)}, {L"height", jn(height)}, {L"coordinate_space", js("css_viewport")}})},
-                                {L"image", image}, {L"state", js(mode_name(b->owner()->control.mode))}}));
+                                {L"image", image}, {L"state", js(mode_name(b->owner()->control.mode))},
+                                {L"site_interactions", b->owner()->sites ? b->owner()->sites->snapshot(b->id) : Json()}}));
                         } catch (const Error& e) { finish(b, op, e.code, e.what()); }
                         catch (...) { finish(b, op, "observation_failed", "Capture or metadata failed"); }
                         return S_OK;
@@ -481,7 +506,7 @@ void Host::handle(const std::string& line) {
         auto method = string(request, L"method", 32);
         if (method != "create" && method != "close" && method != "present" && method != "acquire"
             && method != "renew" && method != "release" && method != "observe" && method != "act"
-            && method != "list_pages" && method != "select_page" && method != "close_page")
+            && method != "list_pages" && method != "select_page" && method != "close_page" && method != "list_downloads")
             throw Error("unknown_method", "Unknown method");
         Json parameters = request.HasKey(L"params") ? request.GetNamedObject(L"params") : Json();
         if (method == "create") { create(id, string(parameters, L"label", 256)); return; }
@@ -495,6 +520,11 @@ void Host::handle(const std::string& line) {
         auto b = session->selected;
         if (!b) throw Error("browser_not_ready", "No ready page");
         expire(b);
+        if (method == "list_downloads") {
+            auto result = session->sites ? session->sites->snapshot() : Json();
+            if (result.HasKey(L"permissions")) result.Remove(L"permissions");
+            success(id, result); return;
+        }
         if (method == "list_pages") {
             winrt::Windows::Data::Json::JsonArray pages;
             for (auto& [page_id, page] : session->pages) {
@@ -712,6 +742,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
             bool capture_page_drag = false;
             HWND root = GetAncestor(message.hwnd, GA_ROOT);
             for (auto& [id, session] : host.browsers) {
+              if (session->sites && session->sites->pre_translate(message)) { handled = true; break; }
               for (auto& [page_id, browser] : session->pages) {
                 if (browser->window != root) continue;
                 const bool page = message.hwnd == browser->page_window || IsChild(browser->page_window, message.hwnd);

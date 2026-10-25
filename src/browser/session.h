@@ -16,6 +16,7 @@
 
 struct Host;
 struct Page;
+struct SiteInteractions;
 
 // A request retains its original page. Selection changes never retarget CDP.
 struct Operation {
@@ -36,6 +37,7 @@ struct Browser : std::enable_shared_from_this<Browser> {
     std::shared_ptr<Page> selected;
     distinct::Control control;
     std::shared_ptr<Operation> active;
+    std::shared_ptr<SiteInteractions> sites;
     uint64_t selection_revision = 0, selection_clock = 0;
     bool ready = false, closing = false;
     void refresh();

@@ -16,6 +16,8 @@ try {
     if ($LASTEXITCODE) { throw 'Integration tests failed' }
     & python tests/pages.py $Executable
     if ($LASTEXITCODE) { throw 'Multi-page tests failed' }
+    & python tests/downloads.py $Executable
+    if ($LASTEXITCODE) { throw 'Downloads and permission tests failed' }
     & python tests/navigation.py $Executable
     if ($LASTEXITCODE) { throw 'Navigation regression tests failed' }
     & python tests/shell.py $Executable

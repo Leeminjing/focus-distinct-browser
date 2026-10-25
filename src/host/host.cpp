@@ -1,4 +1,5 @@
 #include "host.h"
+#include "../browser/site_interactions.h"
 #include <algorithm>
 #include <utility>
 
@@ -91,6 +92,7 @@ void Host::fault(const std::shared_ptr<Page>& page, const std::string& reason) {
     auto browser = page->owner();
     if (!browser) return;
     revoke(page, Mode::faulted, reason);
+    if (browser->sites) for (auto& [id, other] : browser->pages) browser->sites->stop_page(id, "browser_faulted", true);
     if (!browser->ready) { close_browser(browser, reason); return; }
     if (browser->active) finish(browser->active->page, browser->active, "browser_faulted", reason);
     // Creating popups cannot be allowed to complete after a session fault.
@@ -105,13 +107,18 @@ void Host::disconnect() {
     for (auto& [id, browser] : copy) {
         if (browser->selected) revoke(browser->selected, Mode::manual, "disconnected");
         auto pages = browser->pages;
-        for (auto& [page_id, page] : pages) if (!page->ready) close(page, "disconnected_during_creation");
+        for (auto& [page_id, page] : pages) {
+            if (browser->sites) browser->sites->stop_page(page_id, "disconnected", true);
+            if (!page->ready) close(page, "disconnected_during_creation");
+        }
+        browser->refresh();
     }
     if (browsers.empty()) PostQuitMessage(0);
 }
 void Host::tick() {
     auto copy = browsers;
     for (auto& [id, browser] : copy) {
+        if (browser->sites) browser->sites->tick();
         browser->sync_input();
         if (browser->selected) expire(browser->selected);
         auto pages = browser->pages;

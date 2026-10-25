@@ -61,6 +61,9 @@ def run():
         wait_until(lambda: text(address) == page.url("First"), "Back did not return to the original page")
         click(hwnd, 105)
         wait_until(lambda: text(address) == page.url("Second"), "Forward did not restore the page")
+        # SourceChanged updates the address before NavigationCompleted. Until
+        # then button 106 means Stop, so clicking it would test cancellation.
+        wait_until(lambda: "刷新" in text(user32.GetDlgItem(hwnd, 106)), "Forward navigation did not finish")
         loads = sum(r["name"] == "Second" and r["event"] == "loaded" for r in page.records)
         click(hwnd, 106)
         wait_until(lambda: sum(r["name"] == "Second" and r["event"] == "loaded" for r in page.records) > loads,

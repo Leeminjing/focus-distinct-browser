@@ -1,4 +1,5 @@
 #include "../host/host.h"
+#include "site_interactions.h"
 #include <WebView2EnvironmentOptions.h>
 #include <algorithm>
 #include <utility>
@@ -160,6 +161,7 @@ void Host::close(const std::shared_ptr<Page>& page, const std::string& reason) {
     auto browser = page->owner();
     if (!browser) return;
     page->closing = true;
+    if (browser->sites) browser->sites->stop_page(page->id, reason, true);
     if (browser->pages.size() == 1) browser->control.revoke(Mode::closed);
     if (auto request = std::exchange(page->pending_window, {})) {
         event(page, "page_creation_failed", object({{L"opener_page_id", js(page->opener_id)}, {L"reason", js(reason)}}));

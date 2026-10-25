@@ -1,6 +1,8 @@
-# Distinct Browser · v0.4 Multi-page Browsing
+# Distinct Browser · v0.5 Downloads and Site Permissions
 
 一个 Windows 11 x64 原生浏览器宿主：C++17、Win32 窗口、系统 WebView2 Runtime。每个浏览器有真实窗口、独立数据目录和控制权状态。一个进程可以代表多个逻辑调用者，通过重定向的 stdin/stdout 发送 UTF-8 JSON 行。
+
+v0.5 增加原生下载面板和网站权限提示。下载展示进度、保存路径、完成 / 中断原因，支持取消，`Ctrl+J` 可重新打开面板；文件不会自动打开或执行。权限提示显示请求来源和权限类型，由用户选择“允许一次”或“拒绝”，不提供自动授权 RPC，也不保存到 Profile。下载和权限等待会撤销整个浏览器的自动租约；处理结束后由用户交还，调用者必须申请新租约并重新观察。
 
 v0.4 支持同一浏览器会话中的多个页面。网页的新窗口请求会创建受管理的原生窗口，保留来源页并共享所属会话的登录环境；每页有独立 `page_id`，租约仍属于浏览器。新增 `list_pages`、`select_page`、`close_page`，观察和动作可指定页面，切换后必须重新观察。继续兼容不指定页面的 JSONL v1 调用；首版不增加标签栏或新的 UI 框架。
 
@@ -34,7 +36,7 @@ EXE 通过管道启动，不分配控制台。双击 EXE 不会启动演示；�
 ./scripts/build.ps1
 ```
 
-脚本也会寻找 Visual Studio 或 `.tools/msvc/VC/Tools/MSVC` 中的编译器；可以指定 `-MsvcRoot`、`-WindowsSdkRoot`。首次构建下载固定的 WebView2 SDK `1.0.3650.58` 到 `.deps`，校验 SHA-256 后解压，不安装系统组件。
+脚本也会寻找 Visual Studio 或 `.tools/msvc/VC/Tools/MSVC` 中的编译器；可以指定 `-MsvcRoot`、`-WindowsSdkRoot`、`-OutputDirectory`。首次构建下载固定的 WebView2 SDK `1.0.3650.58` 到 `.deps`，校验 SHA-256 后解压，不安装系统组件。
 
 也可在已配置的 MSVC 开发环境中使用 CMake（先用上述脚本取得 SDK）：
 
@@ -50,6 +52,7 @@ ctest --test-dir build/cmake -C Release --output-on-failure
 ./scripts/build.ps1
 python tests/integration.py
 python tests/pages.py
+python tests/downloads.py
 python tests/navigation.py
 python tests/shell.py
 python tests/collaboration.py
@@ -67,6 +70,8 @@ python tests/failures.py
 - 最小化 / 隐藏、恢复后交还、租约到期与续期、关闭后标识失效、断连保留人工窗口。
 - 关联弹窗、`target=_blank`、命名窗口复用、空白弹窗、来源通信、会话内登录数据共享和会话间隔离。
 - 页面身份、切换后旧观察拒绝、跨页互斥、子页接管、在途子页关闭、16 页上限和多页断连收尾。
+- 真实文件内容与摘要、下载进度 / 中断 / 关闭取消、附件导航收尾、子页归属、浏览器间保存路径隔离和下载期间撤权。
+- 真实 Runtime 权限等待与禁止 RPC 授权；COM 探针检查单次决定、重复回调、超时、导航、关闭和断连收尾。探针不代表真实设备授权通过。
 - 畸形 JSON、分片 UTF-8、行大小限制和 EOF；Deferral 在超时、来源关闭、会话关闭及延迟回调中只结算一次。
 - 同文档锚点跳转、重复锚点、移除锚点、HTTP 重定向、页面取消和后续导航取代时的准确收尾。
 - Runtime 缺失、用户数据目录被配置覆盖、测试专属 WebView2 进程故障、操作超时。
@@ -88,6 +93,8 @@ python tests/failures.py
 
 用户数据位于 `%LOCALAPPDATA%/DistinctBrowser/Profiles/<browser_id>/`。关闭不会自动删除这些目录，当前版本不支持进程重启后恢复原标识；如需清理，应在相关宿主和 WebView2 进程退出后处理。
 
+下载保存到系统 Downloads 目录下的 `Distinct Browser/<browser_id>/<download_id>/`，使用独立目录和清理后的文件名。每浏览器最多 4 笔在途下载，保留最近 32 条记录；相同页面的同一 URL 不重复启动并行下载。连续 30 秒没有字节进展会中断，宿主不会恢复或重放下载。权限每浏览器最多 8 个待决请求，120 秒未决定自动拒绝；来源页导航 / 关闭、宿主断连或故障也会结束等待。关闭下载面板不取消下载；关闭来源页面会取消该页下载。
+
 完整接口及当前行为边界见 [协议](docs/protocol.md)。
 
-源码提交后可用 `./scripts/package.ps1` 打包单 EXE、`SHA256SUMS.txt`、`artifact.json`，输出到 `artifacts/releases/v0.4.0/`。`-DesktopValidation`、`-KeyboardStability` 可附加与当前 EXE 摘要一致的验收报告，摘要不符会拒绝打包；不能复用旧版 EXE 的报告充当新版验收。不要分发测试用的 `toolbar-component.exe` 或 `lifecycle-tests.exe`。
+源码提交后可用 `./scripts/package.ps1` 打包单 EXE、`SHA256SUMS.txt`、`artifact.json`，输出到 `artifacts/releases/v0.5.0/`。`-DesktopValidation`、`-KeyboardStability` 可附加与当前 EXE 摘要一致的验收报告，摘要不符会拒绝打包；不能复用旧版 EXE 的报告充当新版验收。不要分发测试用的 `toolbar-component.exe` 或 `lifecycle-tests.exe`。

@@ -8,7 +8,7 @@
 #include "../control.h"
 
 namespace distinct {
-enum class ShellCommand { takeover, address_focus, navigate, back, forward, reload_stop, reload, focus_page, focus_page_next, focus_page_previous };
+enum class ShellCommand { takeover, address_focus, navigate, back, forward, reload_stop, reload, focus_page, focus_page_next, focus_page_previous, downloads };
 struct ShellState {
     Mode mode = Mode::available;
     bool ready = false, connected = true, busy = false, loading = true;

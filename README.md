@@ -97,6 +97,33 @@ python tests/failures.py
 
 标准协作检查向测试自己的原生 HWND 投递消息。桌面空闲时可单独运行 `python tests/desktop_input.py --run`，它会激活自己的测试窗口、移动鼠标并发送系统输入；不要与其他桌面自动化并行。v0.3.1 本机首次通过该套 8 组检查，v0.3.2 拆分钩子线程后复跑通过，报告写入 `artifacts/desktop-validation.json`，含 EXE 摘要、Runtime、DPI、覆盖项与未验收项。系统注入不能代替物理设备和实际 IME 候选窗，详见 [验收记录](docs/v0.3-stability-validation.md)。
 
+### 可选：跨 Windows 用户隔离
+
+常规构建也生成 `cross-user-worker.exe`、`cross-user-runner.exe`，它们仅用于测试，不随单 EXE 交付。
+先运行不创建账户的证据校验与当前用户对照，再按需请求一次 Windows UAC 授权：
+
+```powershell
+python tests/cross_user_contract.py
+python tests/cross_user.py --self-test
+python tests/cross_user.py --elevate
+```
+
+最后一条命令在原用户身份下创建专用浏览器，由受限职责的原生管理员进程临时创建普通本地账户，
+用 `CreateProcessWithLogonW` 的真实本地登录运行无界面的原生探针，不切换桌面、修改交互桌面 ACL 或使用 `/netonly`。
+探针独立核对用户 SID、登录 SID、身份认证代次和非管理员状态；可读对照文件必须成功，端点与空闲 Named Pipe 必须明确返回拒绝访问。
+路径不存在、管道忙、程序未启动、同用户令牌以及任何清理失败均不算通过。之后由原用户接回原页面并验证原标识、输入和窗口保留。
+接口依据：[CreateProcessWithLogonW](https://learn.microsoft.com/en-us/windows/win32/api/winbase/nf-winbase-createprocesswithlogonw)、[NetUserAdd](https://learn.microsoft.com/en-us/windows/win32/api/lmaccess/nf-lmaccess-netuseradd)。
+
+随机密码仅保留在管理员进程内存，不进入命令行、环境变量或报告。临时账户名称和 SID 在创建后写入运行记录；
+账户只加入内置 Users 组，设 15 分钟到期，并在正常结束、失败或探针超时后按原 SID 和标记核对再删除。
+不载入该账户配置文件；如系统产生了配置文件，仅清理此新建 SID 的配置文件。测试的临时目录和专用浏览器数据也会清理，
+不扫描其他账户、端点、版本缓存或浏览数据。Ctrl+C 会等管理员进程完成清理；强制终止管理员进程或断电仍可能留下临时账户，不能保证这种情况下自动删除。
+
+报告默认写入 `artifacts/cross-user-security.json`。普通模式退出码 `0` 才表示跨用户验证通过，`77` 表示未执行（例如未提权），`1` 表示测试或清理失败。
+`--self-test` 的退出码 `0` 仅表示当前用户对照通过，报告始终保留 `cross_user_verified:false`，不代替跨用户或物理输入验收。
+可用 `--executable` 指定正式 EXE、`--tools` 指定测试工具目录、`--report` 指定报告文件。
+普通 `scripts/test.ps1` 不创建账户；显式传入 `-CrossUserSecurity -Elevate` 才附加跨用户检查，未执行不会被当成全绿。
+
 ## 使用边界
 
 每页一个原生窗口，每浏览器最多 16 页，共享浏览器控制权。新页复用来源 Environment / 默认 Profile，不跨浏览器共享数据目录。自动操作仅提供导航、坐标点击、文字、有限命名按键和滚动，不开放任意脚本或通用 CDP 调用。网页原生输入、进入地址栏及工具栏导航都会撤销整个浏览器的自动令牌；仍可使用“接管 / 交还”按钮。`WH_KEYBOARD_LL` 是系统层全局键盘钩子，先确认焦点属于本进程窗口再读取按键，其他应用直接放行；独立消息线程通过每页原子标记将人工输入交给所属浏览器统一撤权。不监听网页脚本，也不使用全局鼠标钩子。
@@ -111,4 +138,4 @@ python tests/failures.py
 
 完整接口及当前行为边界见 [协议](docs/protocol.md)。
 
-源码提交后可用 `./scripts/package.ps1` 打包单 EXE、`SHA256SUMS.txt`、`artifact.json`，输出到 `artifacts/releases/v0.6.0/`。`-DesktopValidation`、`-KeyboardStability` 可附加与当前 EXE 摘要一致的验收报告，摘要不符会拒绝打包；不能复用旧版 EXE 的报告充当新版验收。不要分发测试用的 `toolbar-component.exe` 或 `lifecycle-tests.exe`。
+源码提交后可用 `./scripts/package.ps1` 打包单 EXE、`SHA256SUMS.txt`、`artifact.json`，输出到 `artifacts/releases/v0.6.0/`。`-DesktopValidation`、`-KeyboardStability` 可附加与当前 EXE 摘要一致的验收报告，摘要不符会拒绝打包；不能复用旧版 EXE 的报告充当新版验收。不要分发测试用的 `toolbar-component.exe`、`lifecycle-tests.exe` 或 `cross-user-*.exe`。

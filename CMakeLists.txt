@@ -39,3 +39,13 @@ target_compile_definitions(toolbar-component PRIVATE UNICODE _UNICODE NOMINMAX W
 target_compile_options(toolbar-component PRIVATE /W4 /EHsc /utf-8)
 target_link_options(toolbar-component PRIVATE /MANIFEST:NO)
 target_link_libraries(toolbar-component PRIVATE user32 gdi32 ole32 d2d1 dwrite dwmapi comctl32 advapi32)
+
+# Built for opt-in security acceptance only; never auto-create users in CTest.
+add_executable(cross-user-worker tests/cross_user_worker.cpp)
+add_executable(cross-user-runner tests/cross_user_runner.cpp)
+foreach(target IN ITEMS cross-user-worker cross-user-runner)
+  target_compile_definitions(${target} PRIVATE UNICODE _UNICODE NOMINMAX WIN32_LEAN_AND_MEAN)
+  target_compile_options(${target} PRIVATE /W4 /EHsc /utf-8)
+  target_link_libraries(${target} PRIVATE advapi32)
+endforeach()
+target_link_libraries(cross-user-runner PRIVATE netapi32 bcrypt userenv)

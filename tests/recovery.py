@@ -9,7 +9,7 @@ import base64
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / 'demo'))
-from reconnect_client import ReconnectClient, K, A, D, W, BLOB, INVALID, checked, private_file
+from reconnect_client import ReconnectClient, K, A, D, W, BLOB, INVALID, checked, private_file, token_information, SID_ENTRY
 from pages import Fixture, HTML, denied, eventually
 from downloads import Fixture as DownloadFixture
 from native_ui import click, user32
@@ -86,7 +86,8 @@ def security_checks(endpoint, executable):
     path, original = Path(endpoint), Path(endpoint).read_bytes()
     description = json.loads(original)
     try:
-        for change in ({'process_created': str(int(description['process_created']) + 1)}, {'executable': str(executable.with_name('other.exe'))}):
+        for change in ({'process_created': str(int(description['process_created']) + 1)}, {'executable': str(executable.with_name('other.exe'))},
+                       {'user_sid': 'S-1-5-21-1-2-3-9999'}, {'logon_sid': 'S-1-5-5-0-0'}):
             path.write_text(json.dumps({**description, **change}), encoding='utf-8')
             try: ReconnectClient(endpoint, executable)
             except ConnectionError: pass
@@ -109,6 +110,8 @@ def security_checks(endpoint, executable):
             assert W.WORD.from_address(acl.value + 4).value == 1
             ace = C.c_void_p(); checked(A.GetAce(acl, 0, C.byref(ace)))
             assert not W.DWORD.from_address(ace.value + 4).value & 4, 'client must not create pipe instances'
+            identity = token_information(1)
+            assert A.EqualSid(ace.value + 8, SID_ENTRY.from_buffer(identity).sid), 'pipe access must target the account, not a reusable logon SID'
         finally: K.LocalFree(descriptor)
         peer.handshake(); assert peer.receive()['event'] == 'ready'
         identity = 'duplicate|wire-id'

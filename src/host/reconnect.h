@@ -29,7 +29,7 @@ class ReconnectServer {
     HANDLE pipe_ = INVALID_HANDLE_VALUE, slots_ = nullptr;
     std::atomic<bool> stopping_{false};
     std::thread thread_;
-    std::wstring logon_sid_, pipe_name_;
+    std::wstring user_sid_, logon_sid_, pipe_name_;
     std::string host_id_, credential_, executable_, created_;
     std::filesystem::path directory_, endpoint_;
     bool directory_created_ = false;

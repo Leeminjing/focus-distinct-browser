@@ -18,13 +18,17 @@ class EvidenceContract(unittest.TestCase):
         self.assertTrue(all(validate_broker(VALID, OWNER, NONCE).values()))
 
     def test_wrong_identity_or_local_netonly_token_is_rejected(self):
-        for field, value in [('user_sid', OWNER['user_sid']), ('logon_sid', OWNER['logon_sid']),
+        for field, value in [('user_sid', OWNER['user_sid']),
                              ('authentication_id', OWNER['authentication_id']), ('administrator', True), ('elevated', True)]:
             with self.subTest(field=field):
                 result = deepcopy(VALID); result['probe'][field] = value
                 with self.assertRaises(ValueError): validate_broker(result, OWNER, NONCE)
         result = deepcopy(VALID); result['actual_process_sid'] = OWNER['user_sid']
         with self.assertRaises(ValueError): validate_broker(result, OWNER, NONCE)
+
+    def test_real_secondary_logon_may_share_interactive_logon_sid(self):
+        result = deepcopy(VALID); result['probe']['logon_sid'] = OWNER['logon_sid']
+        self.assertTrue(all(validate_broker(result, OWNER, NONCE).values()))
 
     def test_missing_objects_busy_pipes_and_allowed_access_do_not_count_as_denial(self):
         for field in ('endpoint_error', 'pipe_error'):

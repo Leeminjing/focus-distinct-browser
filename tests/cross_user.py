@@ -29,8 +29,9 @@ def validate_broker(result, owner, nonce):
         'broker_executed': result.get('status') == 'executed',
         'real_other_user': bool(expected and expected != owner.get('user_sid')
             and result.get('actual_process_sid') == expected == probe.get('user_sid')),
-        'different_logon': bool(probe.get('logon_sid') and probe.get('authentication_id')
-            and probe['logon_sid'] != owner.get('logon_sid')
+        # Secondary logon can preserve the interactive logon SID. Verify the
+        # actual account SID and authentication ID rather than assuming otherwise.
+        'different_authentication': bool(probe.get('logon_sid') and probe.get('authentication_id')
             and probe['authentication_id'] != owner.get('authentication_id')),
         'standard_user': probe.get('administrator') is False and probe.get('elevated') is False,
         'probe_control': probe.get('control_readable') is True and probe.get('nonce') == nonce,
@@ -143,11 +144,18 @@ def run(options, report):
         ready_frames = queue.Queue()
         threading.Thread(target=lambda: ready_frames.put(process.stdout.readline()), daemon=True).start()
         ready = json.loads(ready_frames.get(timeout=15))
-        endpoint = Path(ready['endpoint']); description = private_file(endpoint)
+        endpoint = Path(ready['endpoint'])
+        assert str(uuid.UUID(ready['host_id'])).upper() == ready['host_id']
+        expected = Path(os.environ['LOCALAPPDATA']) / 'DistinctBrowser' / 'Hosts' / ready['host_id'] / 'endpoint.json'
+        assert endpoint.absolute() == expected.absolute()
+        # Capture only this fresh child host's descriptor for cleanup even when
+        # the strict current client refuses an older/insecure endpoint format.
+        description = json.loads(endpoint.read_text(encoding='utf-8'))
         assert ready['pid'] == description['pid'] == process.pid and description['host_id'] == ready['host_id']
         assert endpoint.name == 'endpoint.json' and endpoint.parent.name == ready['host_id']
         assert Path(description['executable']).resolve() == options.executable
         actual_endpoint = final_path(endpoint)
+        assert private_file(endpoint) == description
         connection = reconnect(endpoint, options.executable)
         created = connection.call('create', label='Cross-user security acceptance')
         browser_id = created['browser_id']
@@ -165,6 +173,7 @@ def run(options, report):
         owner = json.loads(owner_result.read_text(encoding='utf-8'))
         assert owner['endpoint_error'] == owner['pipe_error'] == 0 and owner['control_readable'] and owner['nonce'] == nonce
         report['owner_positive_controls'] = True
+        report['owner_identity'] = {key: owner[key] for key in ('user_sid', 'logon_sid', 'authentication_id')}
         if options.self_test:
             # Same-user controls must be rejected by the cross-user contract.
             try: validate_broker({'probe': owner}, owner, nonce)
@@ -219,7 +228,7 @@ def run(options, report):
             try:
                 if browser_id and actual_endpoint: remove_owned_profile(actual_endpoint, browser_id)
                 if actual_endpoint and endpoint.exists():
-                    if private_file(endpoint) != description or final_path(endpoint) != actual_endpoint:
+                    if json.loads(endpoint.read_text(encoding='utf-8')) != description or final_path(endpoint) != actual_endpoint:
                         raise ValueError('Unexpected residual endpoint identity')
                     endpoint.unlink(); endpoint.parent.rmdir()
             except Exception: cleanup_errors.append('owned_profile_or_endpoint')

@@ -10,8 +10,12 @@ try {
     if ($LASTEXITCODE) { throw 'Address tests failed' }
     & (Join-Path (Split-Path $Executable -Parent) 'page-input-tests.exe')
     if ($LASTEXITCODE) { throw 'Page input tests failed' }
+    & (Join-Path (Split-Path $Executable -Parent) 'lifecycle-tests.exe')
+    if ($LASTEXITCODE) { throw 'Page lifecycle tests failed' }
     & python tests/integration.py $Executable
     if ($LASTEXITCODE) { throw 'Integration tests failed' }
+    & python tests/pages.py $Executable
+    if ($LASTEXITCODE) { throw 'Multi-page tests failed' }
     & python tests/navigation.py $Executable
     if ($LASTEXITCODE) { throw 'Navigation regression tests failed' }
     & python tests/shell.py $Executable

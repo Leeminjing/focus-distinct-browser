@@ -24,18 +24,35 @@
 
 | method | params | result / 行为 |
 | --- | --- | --- |
-| `create` | `label` | 在窗口、独立用户数据环境、Controller 和初始页面都可用后返回 `browser_id`、`hwnd`、`browser_process_id`、`state`；最长初始化等待 45 秒 |
-| `present` | `browser_id` | 展示或恢复原窗口；返回 `visible`、`foreground`、`state`。`foreground:false` 表示 Windows 没有准许前台激活，页面仍然存在 |
+| `create` | `label` | 在窗口、独立用户数据环境、Controller 和初始页面都可用后返回 `browser_id`、`page_id`、`hwnd`、`browser_process_id`、`state`；最长初始化等待 45 秒 |
+| `present` | `browser_id`, 可选 `page_id` | 展示或恢复原窗口；指定页面时选择并展示该页，省略时展示当前页。返回 `visible`、`foreground`、`state`。`foreground:false` 表示 Windows 没有准许前台激活，页面仍然存在 |
 | `acquire` | `browser_id`, `client_id`, 可选 `ttl_ms` | 返回新 `token`、`ttl_ms`。同一调用者再次申请也会收到 `busy`，续期应使用 `renew` |
 | `renew` | `browser_id`, `token`, 可选 `ttl_ms` | 从处理请求的时刻重新计算租约；返回 `ttl_ms` |
 | `observe` | `browser_id`, `token` | 返回 URL、标题、CSS 视口、PNG 和控制状态；完成后允许该租约执行动作 |
 | `act` | `browser_id`, `token`, `action` | 执行一个动作。每个浏览器最多一个在途的 `observe` 或 `act` |
 | `release` | `browser_id`, `token` | 立即撤销租约，返回空对象；已发操作仍收尾，其收尾前新调用者申请收到 `busy` |
 | `close` | `browser_id` | 撤销控制、关闭原生窗口和 WebView2、使标识永久失效；返回空对象 |
+| `list_pages` | `browser_id` | 返回 `selected_page_id` 和 `pages` 列表；不需要租约，每项含 `page_id`、`opener_page_id`、`url`、`title`、`hwnd`、`ready`、`loading` |
+| `select_page` | `browser_id`, `token`, `page_id` | 选择并展示已有页面，返回 `page_id`、`foreground`；清除旧观察，不重新加载 |
+| `close_page` | `browser_id`, `token`, `page_id` | 关闭一个页面；关闭当前页时选择最近使用的存活页；关闭最后一页使浏览器标识失效 |
 
 `label` 最多 256 字节，`client_id` 最多 128 字节，均为非空字符串且不能含 NUL。`token` 为不透明的持有者凭据，每次取得控制都会生成新令牌。租约默认 30,000 ms，允许 1,000–300,000 ms；宿主使用单调时钟，并在实际派发前检查到期。
 
 `present` 和 `close` 是连接级管理操作，不需要控制令牌。前台调用程序可针对 `ready.pid` 调用 Windows 的 `AllowSetForegroundWindow`，然后再调用 `present`。前台结果由 Windows 决定。
+
+### 多页面（v0.4）
+
+每个 `browser_id` 是一个隔离会话，包含一个 Environment / 默认 Profile、多个真实页面及一份控制租约。每页对应一个原生顶层窗口和不可复用的 `page_id`。`create.hwnd` 对应初始页面，不代表以后所有页面；`present` 展示当前选中页，`close` 关闭全部页面。
+
+`observe` 和 `act` 可附加 `page_id`。省略时作用于当前页；显式指定的页面必须属于该浏览器且正被选中，否则返回 `page_not_found` 或 `page_not_selected`，不会改投其他页。观察结果包含截图对应的 `page_id`。选择其他页、新页面成为当前页、关闭当前页，均使旧观察失效；重新观察前动作返回 `observation_required`。观察期间切页返回 `page_changed`。
+
+`select_page`、`close_page` 检查浏览器级令牌和唯一在途操作槽，不要求事先观察。已有 `observe` / `act` 在途时返回 `busy`，不能使用另一个页面绕过互斥。用户通过原生窗口切换页面不自动撤销租约，但仍会使旧观察失效。任何页面的人工输入或接管按钮都会撤销整个浏览器的租约；交还后需要重新申请并观察。
+
+网页 `window.open` / `target=_blank` 创建的新页使用来源 Environment 和 Profile，通过 WebView2 的关联新窗口接口接入，保留 Cookie、localStorage 及原本的 opener / noopener 语义。原页面保留；空白弹窗也可观察。命名窗口由 WebView2 复用。每浏览器最多 16 页（包括初始化中的页面），超出或初始化失败发出 `page_creation_failed`，不生成未受管理窗口。
+
+新页初始化最长 45 秒。失败、来源页关闭或整个浏览器关闭时完成等待中的 Deferral，并关闭未完成的页。初始化已完成的子页可以在来源页关闭后继续存在。网页调用 `window.close()` 只关闭该页。某页发生 WebView2 进程故障时，保守地将整个浏览器会话标为 `faulted`。
+
+最小化或隐藏任何页面会暂停该浏览器的自动操作；所有剩余页面恢复可见后才能交还。可通过不需要租约的 `present(browser_id, page_id)` 逐一恢复后台暂停页。展示另一页同样清除旧观察，不授予或撤销租约。遮挡或切换其他应用不暂停。断连保留所有已初始化页面供人工查看，最后一个窗口关闭才退出宿主。
 
 ### 观察
 
@@ -46,7 +63,7 @@
 返回结构：
 
 ```json
-{"url":"https://example.org/","title":"Example","viewport":{"width":900,"height":600,"coordinate_space":"css_viewport"},"image":{"mime_type":"image/png","base64":"...","width":1350,"height":900},"state":"automatic"}
+{"page_id":"...","url":"https://example.org/","title":"Example","viewport":{"width":900,"height":600,"coordinate_space":"css_viewport"},"image":{"mime_type":"image/png","base64":"...","width":1350,"height":900},"state":"automatic"}
 ```
 
 `image` 是网页截图，不含原生控制栏。坐标使用网页视口 CSS 像素；截图位置换算为点击坐标时，横向乘 `viewport.width / image.width`，纵向乘 `viewport.height / image.height`。PNG 上限 24 MiB。
@@ -97,7 +114,7 @@
 {"event":"control_changed","browser_id":"...","state":"manual","detail":{"reason":"takeover"}}
 ```
 
-事件包括 `created`、`control_changed`、`paused`、`closed`、`faulted`、`navigation_completed`、`popup_blocked`。`detail` 可含原因、导航成功标志或被阻止的 URL；未规定的字段应忽略。通用 `protocol_error` 没有浏览器标识。
+事件包括 `created`、`control_changed`、`paused`、`closed`、`faulted`、`navigation_completed`，以及 `page_created`、`page_selected`、`page_closed`、`page_creation_failed`。页面事件在 `detail.page_id` 标明页面，创建事件另有 `opener_page_id`，选择和关闭事件另有 `reason`。创建失败包含 `reason` 和 `opener_page_id`，只在实际分配了页面标识时包含 `page_id`。导航事件附加 `detail.page_id`。旧的 `popup_blocked` 已由受管理页面事件替代。未规定的字段和未识别事件应忽略。通用 `protocol_error` 没有浏览器标识。
 
 v0.3 的网页原生输入接管沿用 `control_changed`，首次输入的 `detail.reason` 为 `human_input`。没有在途操作时状态为 `manual`，否则先发 `taking_over`，已派发操作收尾后转 `manual`。悬停、展示和 CDP 输入不产生该原因。重复人工输入不重复撤销；用户交还后仍需新租约和新观察。输入并不撤回已经派发的命令或保证其页面副作用取消。
 
@@ -106,5 +123,7 @@ EOF、stdout 写失败或输出队列超过 64 MiB 都视为断连：统一撤�
 ## 常见错误码
 
 `invalid_request`、`unknown_method`、`runtime_missing`、`creation_failed`、`browser_not_found`、`browser_not_ready`、`busy`、`control_unavailable`、`window_paused`、`invalid_token`、`observation_required`、`page_loading`、`page_changed`、`invalid_action`、`navigation_failed`、`navigation_cancelled`、`navigation_superseded`、`observation_failed`、`capture_failed`、`action_failed`、`browser_faulted`、`browser_closed`。
+
+多页面另有 `page_not_found`、`page_not_selected`、`page_not_ready`、`page_closed`。关闭正在操作的子页返回 `page_closed`，详情仍说明已派发步骤和未知副作用；不会把剩余动作投递到其他页面。
 
 失败不自动重试，尤其不要盲目重发带 `result_unknown:true` 的动作。`busy` 也不代表动作已入队；收到错误的调用者需要根据最新控制状态重新决定下一步。

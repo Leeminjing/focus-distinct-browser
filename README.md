@@ -1,6 +1,8 @@
-# Distinct Browser · v0.5 Downloads and Site Permissions
+# Distinct Browser · v0.6 Session Recovery Prototype
 
 一个 Windows 11 x64 原生浏览器宿主：C++17、Win32 窗口、系统 WebView2 Runtime。每个浏览器有真实窗口、独立数据目录和控制权状态。一个进程可以代表多个逻辑调用者，通过重定向的 stdin/stdout 发送 UTF-8 JSON 行。
+
+v0.6 原型增加可选的存活宿主重连。`--reconnect` 使用本地命名管道；客户端退出后保留真实窗口、页面、输入和滚动状态。新连接验证宿主身份并读取快照，浏览器仍保持人工控制；交还后必须申请新令牌并重新观察。旧请求、旧输出与迟到回调按连接代次隔离，不重放动作。无参数仍为原有 stdin/stdout JSONL v1。此原型尚未接入上层应用，也不恢复已经退出的宿主或崩溃前的业务工作。
 
 v0.5 增加原生下载面板和网站权限提示。下载展示进度、保存路径、完成 / 中断原因，支持取消，`Ctrl+J` 可重新打开面板；文件不会自动打开或执行。权限提示显示请求来源和权限类型，由用户选择“允许一次”或“拒绝”，不提供自动授权 RPC，也不保存到 Profile。下载和权限等待会撤销整个浏览器的自动租约；处理结束后由用户交还，调用者必须申请新租约并重新观察。
 
@@ -27,6 +29,17 @@ python demo/demo.py
 人机协作演示：`python demo/collaborate.py`。两个调用者持续操作各自的计数器；直接操作 A 后 A 停止、B 继续，点击“交还”后 A 用新租约观察再继续。`--typing` 模式让输入框保持焦点，便于手工验证键盘和 IME 介入。演示不注入系统键鼠。
 
 EXE 通过管道启动，不分配控制台。双击 EXE 不会启动演示；其他语言的调用方可以直接启动 EXE 并连接管道，不需要 Python。
+
+存活会话恢复演示（独立输出目录，避免覆盖正在使用的旧版 EXE）：
+
+```powershell
+./scripts/build.ps1 -OutputDirectory build/v06
+python demo/recover.py --url https://example.com
+# 退出客户端后，使用上一步打印的 Endpoint 原样重连：
+python demo/recover.py --endpoint "<Endpoint 路径>"
+```
+
+重连后先在原生窗口点击“交还”，演示客户端才申请新租约并观察。保留 Endpoint 路径即可；不要复制或展示其中的受保护凭据。宿主已退出时客户端报错，不自动创建替代页面。访问边界与连接规则见[协议](docs/protocol.md#可选的存活宿主重连v06-原型)。
 
 ## 构建
 
@@ -58,6 +71,7 @@ python tests/shell.py
 python tests/collaboration.py
 python tests/toolbar_component.py
 python tests/protocol.py
+python tests/recovery.py build/v06/distinct-browser.exe
 python tests/failures.py
 ```
 

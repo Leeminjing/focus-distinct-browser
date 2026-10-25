@@ -221,6 +221,10 @@ void SiteInteractions::attach(const std::shared_ptr<Page>& page) {
         }).Get(), &token), "PermissionRequested");
 }
 void SiteInteractions::download_starting(const std::shared_ptr<Page>& page, ICoreWebView2DownloadStartingEventArgs* args) {
+    if (host->reconnectable && !host->connection_valid()) {
+        args->put_Cancel(TRUE);
+        host->event(page, "download_rejected", object({{L"reason", js("disconnected")}})); return;
+    }
     ComPtr<ICoreWebView2DownloadOperation> native;
     ComPtr<IUnknown> identity;
     checked(args->get_DownloadOperation(&native), "DownloadOperation");
@@ -325,9 +329,9 @@ void SiteInteractions::permission_requested(const std::shared_ptr<Page>& page, I
     ComPtr<ICoreWebView2PermissionRequestedEventArgs3> extended;
     bool supported = SUCCEEDED(args->QueryInterface(IID_PPV_ARGS(&extended))) &&
         SUCCEEDED(extended->put_SavesInProfile(FALSE)) && SUCCEEDED(extended->put_Handled(TRUE));
-    if (!supported || record->kind == "unknown" || !host->connected ||
+    if (!supported || record->kind == "unknown" || !host->connection_valid() ||
         std::count_if(permissions.begin(), permissions.end(), [](auto& item) { return !item->done; }) > 8) {
-        resolve_permission(record->id, false, !host->connected ? "disconnected" : "unsupported_or_request_limit"); return;
+        resolve_permission(record->id, false, !host->connection_valid() ? "disconnected" : "unsupported_or_request_limit"); return;
     }
     host->revoke(page, Mode::manual, "permission_requested");
     host->event(page, "permission_requested", record->json());
@@ -339,8 +343,9 @@ void SiteInteractions::resolve_permission(const std::string& id, bool allow, con
     auto record = *found;
     if (record->done) return;
     auto page = record->page.lock();
-    allow = allow && page && !page->closing && host->connected && page->revision == record->revision;
-    record->done = true; record->reason = reason; record->status = allow ? "allowed_once" : "denied";
+    const bool disconnected = !host->connection_valid();
+    allow = allow && page && !page->closing && !disconnected && page->revision == record->revision;
+    record->done = true; record->reason = disconnected ? "disconnected" : reason; record->status = allow ? "allowed_once" : "denied";
     if (record->window) { auto window = std::exchange(record->window, nullptr); DestroyWindow(window); }
     HRESULT result = record->args->put_State(allow ? COREWEBVIEW2_PERMISSION_STATE_ALLOW : COREWEBVIEW2_PERMISSION_STATE_DENY);
     if (FAILED(result)) { record->status = "failed"; record->reason = "permission_state_failed"; }

@@ -38,6 +38,7 @@ struct Browser : std::enable_shared_from_this<Browser> {
     distinct::Control control;
     std::shared_ptr<Operation> active;
     std::shared_ptr<SiteInteractions> sites;
+    distinct::Json interrupted_operation;
     uint64_t selection_revision = 0, selection_clock = 0;
     bool ready = false, closing = false;
     void refresh();

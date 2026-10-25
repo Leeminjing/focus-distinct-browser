@@ -19,10 +19,11 @@ class PipeOutput {
     std::deque<std::string> queue_;
     size_t bytes_ = 0;
     bool stopped_ = false;
+    bool overlapped_ = false;
     std::thread thread_;
 public:
-    PipeOutput(HANDLE pipe, std::function<void()> disconnected) :
-        pipe_(pipe), disconnected_(std::move(disconnected)), thread_([this] { run(); }) {}
+    PipeOutput(HANDLE pipe, std::function<void()> disconnected, bool overlapped = false) :
+        pipe_(pipe), disconnected_(std::move(disconnected)), overlapped_(overlapped), thread_([this] { run(); }) {}
     ~PipeOutput() {
         { std::lock_guard<std::mutex> lock(mutex_); stopped_ = true; }
         wake_.notify_one();
@@ -40,6 +41,27 @@ public:
         wake_.notify_one();
     }
 private:
+    bool write(const char* data, DWORD size, DWORD& written) {
+        if (!overlapped_) return WriteFile(pipe_, data, size, &written, nullptr) != FALSE;
+        HANDLE event = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+        if (!event) return false;
+        OVERLAPPED operation{}; operation.hEvent = event;
+        bool ok = WriteFile(pipe_, data, size, &written, &operation) != FALSE;
+        if (!ok && GetLastError() == ERROR_IO_PENDING) {
+            for (;;) {
+                if (WaitForSingleObject(event, 25) == WAIT_OBJECT_0) {
+                    ok = GetOverlappedResult(pipe_, &operation, &written, FALSE) != FALSE; break;
+                }
+                bool stop;
+                { std::lock_guard<std::mutex> lock(mutex_); stop = stopped_; }
+                if (stop) {
+                    CancelIoEx(pipe_, &operation);
+                    GetOverlappedResult(pipe_, &operation, &written, TRUE); break;
+                }
+            }
+        }
+        CloseHandle(event); return ok;
+    }
     void run() {
         for (;;) {
             std::string line;
@@ -52,7 +74,7 @@ private:
             size_t offset = 0;
             while (offset < line.size()) {
                 DWORD written = 0;
-                if (!WriteFile(pipe_, line.data() + offset, static_cast<DWORD>(line.size() - offset), &written, nullptr) || !written) {
+                if (!write(line.data() + offset, static_cast<DWORD>(line.size() - offset), written) || !written) {
                     { std::lock_guard<std::mutex> lock(mutex_); stopped_ = true; }
                     disconnected_(); return;
                 }

@@ -204,5 +204,21 @@ int main() {
         SendMessage(sites->downloads_window, WM_CLOSE, 0, 0);
         assert(!sites->downloads_window && IsWindow(s.root->window));
     }
-    std::cout << "Site interaction lifecycle tests passed: revoke, drain, one-request grant, fresh observation, deny, timeout, navigation, close, disconnect, filename, stable download selection\n";
+    {
+        InteractionSetup s;
+        s.host.reconnectable = true;
+        s.host.connection = std::make_shared<PipeConnection>();
+        auto pending = Microsoft::WRL::Make<PermissionProbe>();
+        s.browser->sites->permission_requested(s.root, pending.Get());
+        assert(s.browser->sites->pending());
+        s.host.connection->alive = false; // Transport detected loss before the STA detach message.
+        s.browser->sites->resolve_permission(s.browser->sites->permissions.back()->id, true, "test_native_decision");
+        assert(pending->state == COREWEBVIEW2_PERMISSION_STATE_DENY && pending->probe->completions == 1);
+        assert(s.browser->sites->permissions.back()->reason == "disconnected");
+        auto late = Microsoft::WRL::Make<PermissionProbe>();
+        s.browser->sites->permission_requested(s.root, late.Get());
+        assert(late->state == COREWEBVIEW2_PERMISSION_STATE_DENY && late->probe->completions == 1);
+        assert(!s.browser->sites->pending());
+    }
+    std::cout << "Site interaction lifecycle tests passed: revoke, drain, one-request grant, fresh observation, deny, timeout, navigation, close, disconnect, filename, stable download selection, atomic connection-loss guard (COM probes, not device permission acceptance)\n";
 }

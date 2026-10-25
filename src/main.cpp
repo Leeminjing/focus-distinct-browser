@@ -1,6 +1,7 @@
 #include <windows.h>
 #include <roapi.h>
 #include <shlobj.h>
+#include <shellapi.h>
 #include <shlwapi.h>
 #include <wincrypt.h>
 #include <wrl.h>
@@ -38,6 +39,7 @@ constexpr UINT input_message = WM_APP + 1, disconnected_message = WM_APP + 2;
 constexpr UINT manual_navigation_message = WM_APP + 4, focus_toolbar_message = WM_APP + 5;
 constexpr UINT human_input_message = WM_APP + 6;
 constexpr UINT page_shortcut_message = WM_APP + 7;
+constexpr UINT transport_message = WM_APP + 8;
 constexpr int page_host_id = 108;
 static uint64_t now() { return GetTickCount64(); }
 static std::string guid() {
@@ -88,7 +90,7 @@ void Page::refresh() {
     auto session = owner();
     if (!session || !window || closing || !toolbar) return;
     ShellState state;
-    state.mode = owner()->control.mode; state.ready = ready; state.connected = host->connected;
+    state.mode = owner()->control.mode; state.ready = ready; state.connected = host->connection_valid();
     state.busy = owner()->control.busy; state.loading = navigating; state.notice = notice;
     if (state.notice.empty() && session->sites && (state.mode == Mode::manual || state.mode == Mode::taking_over || state.mode == Mode::paused))
         state.notice = session->sites->notice(id);
@@ -128,7 +130,7 @@ void Page::user_command(ShellCommand command) {
                 for (auto& [page_id, page] : owner()->pages) owner()->sites->show_pending(page);
                 owner()->refresh(); return;
             }
-            if (host->connected && owner()->visible() && owner()->control.hand_back().empty()) {
+            if (host->connection_valid() && owner()->visible() && owner()->control.hand_back().empty()) {
                 notice.clear(); owner()->refresh(); host->event(self, "control_changed", object({{L"reason", js("hand_back")}}));
                 controller->MoveFocus(COREWEBVIEW2_MOVE_FOCUS_REASON_PROGRAMMATIC);
             }
@@ -491,19 +493,22 @@ void Host::dispatch_step(const std::shared_ptr<Page>& b, const std::shared_ptr<O
     if (FAILED(hr)) { --op->dispatched; finish(b, op, "action_failed", "CDP dispatch failed"); }
 }
 
-void Host::handle(const std::string& line) {
-    if (!connected) return;
+void Host::handle(const std::string& line, uint64_t source_generation) {
+    if (!connection_valid() || (reconnectable && source_generation != generation)) return;
     std::string id;
     try {
         auto request = Json::Parse(winrt::to_hstring(line));
-        id = string(request, L"id", 128);
+        auto wire_id = string(request, L"id", 128);
+        id = reconnectable ? std::to_string(source_generation) + "|" + wire_id : wire_id;
         if (pending.count(id)) {
             // Do not send a second response with the same id; it could complete
             // the original caller's promise incorrectly.
-            send(object({{L"event", js("protocol_error")}, {L"detail", object({{L"code", js("duplicate_id")}, {L"id", js(id)}})}})); return;
+            send(object({{L"event", js("protocol_error")}, {L"detail", object({{L"code", js("duplicate_id")}, {L"id", js(wire_id)}})}})); return;
         }
         pending.insert(id);
         auto method = string(request, L"method", 32);
+        if (reconnectable && method == "snapshot") { success(id, snapshot()); return; }
+        if (reconnectable && method == "ping") { success(id); return; }
         if (method != "create" && method != "close" && method != "present" && method != "acquire"
             && method != "renew" && method != "release" && method != "observe" && method != "act"
             && method != "list_pages" && method != "select_page" && method != "close_page" && method != "list_downloads")
@@ -660,6 +665,11 @@ static LRESULT CALLBACK DispatcherProc(HWND window, UINT message, WPARAM wparam,
         SetWindowLongPtr(window, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(host));
     }
     if (host) {
+        if (message == transport_message) {
+            std::unique_ptr<TransportMessage> frame(reinterpret_cast<TransportMessage*>(lparam));
+            if (frame->kind == TransportMessage::Kind::input) host->recovery->release_slot();
+            host->transport(*frame); return 0;
+        }
         if (message == input_message) {
             std::unique_ptr<std::string> line(reinterpret_cast<std::string*>(lparam));
             ReleaseSemaphore(reinterpret_cast<HANDLE>(wparam), 1, nullptr);
@@ -674,9 +684,14 @@ static LRESULT CALLBACK DispatcherProc(HWND window, UINT message, WPARAM wparam,
 int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
     try {
         winrt::init_apartment(winrt::apartment_type::single_threaded);
+        int argc = 0;
+        auto arguments = CommandLineToArgvW(GetCommandLineW(), &argc);
+        bool reconnectable = argc == 2 && std::wstring(arguments[1]) == L"--reconnect";
+        LocalFree(arguments);
+        if (argc != 1 && !reconnectable) throw Error("invalid_argument", "Supported option: --reconnect");
         // No console allocation: redirected handles are supplied by the caller.
         auto input = GetStdHandle(STD_INPUT_HANDLE), output = GetStdHandle(STD_OUTPUT_HANDLE);
-        if (GetFileType(input) != FILE_TYPE_PIPE || GetFileType(output) != FILE_TYPE_PIPE)
+        if (!reconnectable && (GetFileType(input) != FILE_TYPE_PIPE || GetFileType(output) != FILE_TYPE_PIPE))
             throw Error("pipes_required", "Launch using the demo/client with redirected stdin and stdout");
         using VersionFn = LONG(WINAPI*)(OSVERSIONINFOW*);
         auto version_fn = reinterpret_cast<VersionFn>(GetProcAddress(GetModuleHandle(L"ntdll.dll"), "RtlGetVersion"));
@@ -684,6 +699,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
         if (!version_fn || version_fn(&version) != 0 || version.dwBuildNumber < 22000)
             throw Error("unsupported_os", "Requires Windows 11 or later");
         Host host;
+        host.reconnectable = reconnectable; host.connected = !reconnectable;
         PWSTR local = nullptr; checked(SHGetKnownFolderPath(FOLDERID_LocalAppData, 0, nullptr, &local), "LocalAppData");
         host.data_root = fs::path(local) / L"DistinctBrowser" / L"Profiles";
         CoTaskMemFree(local); fs::create_directories(host.data_root);
@@ -700,15 +716,25 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
         if (!RegisterClass(&dispatch_class)) throw Error("startup_failed", "Cannot register dispatcher class");
         host.dispatcher = CreateWindowEx(0, dispatch_class.lpszClassName, L"", 0, 0, 0, 0, 0, HWND_MESSAGE, nullptr, instance, &host);
         if (!host.dispatcher) throw Error("startup_failed", "Cannot create dispatcher");
-        host.output = std::make_unique<PipeOutput>(output, [dispatcher = host.dispatcher] { PostMessage(dispatcher, disconnected_message, 0, 0); });
+        std::unique_ptr<ReconnectServer> recovery;
+        std::unique_ptr<PipeOutput> bootstrap_output;
+        if (reconnectable) {
+            recovery = std::make_unique<ReconnectServer>(host.dispatcher, transport_message, host.data_root.parent_path() / L"Hosts");
+            host.recovery = recovery.get(); host.host_id = recovery->host_id();
+            if (GetFileType(output) == FILE_TYPE_PIPE) {
+                bootstrap_output = std::make_unique<PipeOutput>(output, [] {});
+                bootstrap_output->send(recovery->bootstrap());
+            }
+        } else host.output = std::make_unique<PipeOutput>(output, [dispatcher = host.dispatcher] { PostMessage(dispatcher, disconnected_message, 0, 0); });
         SetTimer(host.dispatcher, 1, 200, nullptr);
         if (!host.keyboard_guard.start(human_input_message, page_shortcut_message))
             throw Error("startup_failed", "Cannot install native keyboard takeover protection");
         host.send(object({{L"event", js("ready")}, {L"protocol_version", jn(1)}, {L"pid", jn(GetCurrentProcessId())}}));
         std::atomic<bool> stopping = false;
-        HANDLE slots = CreateSemaphore(nullptr, 128, 128, nullptr);
-        if (!slots) throw Error("startup_failed", "Cannot allocate input queue semaphore");
-        std::thread reader([&, dispatcher = host.dispatcher] {
+        HANDLE slots = reconnectable ? nullptr : CreateSemaphore(nullptr, 128, 128, nullptr);
+        if (!reconnectable && !slots) throw Error("startup_failed", "Cannot allocate input queue semaphore");
+        std::thread reader;
+        if (!reconnectable) reader = std::thread([&, dispatcher = host.dispatcher] {
             std::string line; bool oversized = false;
             auto post = [&](std::string text) {
                 while (!stopping) {
@@ -762,13 +788,18 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
             if (message.message == WM_LBUTTONUP && GetCapture() == message.hwnd) ReleaseCapture();
         }
         stopping = true;
-        while (WaitForSingleObject(reader.native_handle(), 50) == WAIT_TIMEOUT)
-            CancelSynchronousIo(reader.native_handle());
-        reader.join();
+        if (reader.joinable()) {
+            while (WaitForSingleObject(reader.native_handle(), 50) == WAIT_TIMEOUT) CancelSynchronousIo(reader.native_handle());
+            reader.join();
+        }
+        host.output.reset(); recovery.reset(); host.recovery = nullptr;
         MSG leftover{};
         while (PeekMessage(&leftover, host.dispatcher, input_message, input_message, PM_REMOVE))
             delete reinterpret_cast<std::string*>(leftover.lParam);
-        CloseHandle(slots); KillTimer(host.dispatcher, 1);
+        while (PeekMessage(&leftover, host.dispatcher, transport_message, transport_message, PM_REMOVE))
+            delete reinterpret_cast<TransportMessage*>(leftover.lParam);
+        if (slots) CloseHandle(slots);
+        KillTimer(host.dispatcher, 1);
         host.output.reset(); DestroyWindow(host.dispatcher);
         return 0;
     } catch (const std::exception& e) {

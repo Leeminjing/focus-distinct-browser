@@ -91,7 +91,8 @@ def run():
         mouse_before = cursor()
         with ThreadPoolExecutor(max_workers=2) as pool:
             list(pool.map(populate, [(pa, "A"), (pb, "B")]))
-        assert cursor() == mouse_before, "Automation moved the desktop cursor"
+        mouse_after = cursor()
+        assert mouse_after == mouse_before, f"Desktop cursor changed during automation: {mouse_before} -> {mouse_after}; this check requires an idle desktop"
         ra = fixture.wait(lambda r: r["name"] == "A" and r["count"] == 1)
         rb = fixture.wait(lambda r: r["name"] == "B" and r["count"] == 1)
         assert ra["cookie"] != rb["cookie"] and ra["storage"] != rb["storage"]

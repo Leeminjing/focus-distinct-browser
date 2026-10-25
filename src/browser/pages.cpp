@@ -142,7 +142,7 @@ void Host::new_window(const std::shared_ptr<Page>& opener, ICoreWebView2NewWindo
     checked(args->put_Handled(TRUE), "NewWindowRequested.Handled");
     auto browser = opener->owner();
     if (!browser) return;
-    if (browser->closing || !connected || browser->control.mode == Mode::faulted || browser->pages.size() >= 16) {
+    if (browser->closing || !connection_valid() || browser->control.mode == Mode::faulted || browser->pages.size() >= 16) {
         event(browser, "page_creation_failed", object({{L"opener_page_id", js(opener->id)}, {L"reason", js("session_unavailable_or_page_limit")}})); return;
     }
     auto request = std::make_shared<PendingWindow>(); request->args = args;

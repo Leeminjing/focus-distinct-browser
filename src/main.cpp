@@ -38,7 +38,6 @@ constexpr UINT manual_navigation_message = WM_APP + 4, focus_toolbar_message = W
 constexpr UINT human_input_message = WM_APP + 6;
 constexpr UINT page_shortcut_message = WM_APP + 7;
 constexpr int page_host_id = 108;
-constexpr uint64_t operation_timeout = 20000, create_timeout = 45000;
 static uint64_t now() { return GetTickCount64(); }
 static std::string guid() {
     GUID id{}; checked(CoCreateGuid(&id), "CoCreateGuid");
@@ -55,164 +54,23 @@ static std::wstring canonical_uri(PCWSTR text) {
     return std::wstring(uri.c_str(), uri.size());
 }
 
-struct Host;
-struct Operation {
-    std::string request, token, kind;
-    std::wstring navigation_target;
-    uint64_t started = now(), revision = 0, navigation_id = 0;
-    size_t dispatched = 0, completed = 0;
-    bool done = false;
-    std::vector<std::pair<std::wstring, Json>> steps;
-};
-struct Browser : std::enable_shared_from_this<Browser> {
-    Host* host = nullptr;
-    std::string id, label, creation;
-    uint64_t created = now(), revision = 0, navigation_id = 0;
-    fs::path profile;
-    HWND window = nullptr, page_window = nullptr;
-    std::unique_ptr<NativeToolbar> toolbar;
-    std::shared_ptr<KeyboardTarget> keyboard;
-    std::optional<ShellCommand> pending_manual;
-    std::wstring pending_address, notice;
-    ComPtr<ICoreWebView2Environment> environment;
-    ComPtr<ICoreWebView2Controller> controller;
-    ComPtr<ICoreWebView2> view;
-    Control control;
-    std::shared_ptr<Operation> active;
-    bool ready = false, navigating = true, closing = false;
-    double viewport_width = 0, viewport_height = 0;
-    void layout();
-    void refresh();
-    void user_command(ShellCommand command);
-    void human_input();
-    void sync_input();
-    void drain_manual();
-};
-struct Host {
-    KeyboardGuard keyboard_guard;
-    HWND dispatcher = nullptr;
-    std::unique_ptr<PipeOutput> output;
-    std::map<std::string, std::shared_ptr<Browser>> browsers;
-    std::set<std::string> pending;
-    bool connected = true;
-    fs::path data_root;
+#include "host/host.h"
 
-    void send(Json message) { if (connected) output->send(message); }
-    void success(const std::string& id, Json result = Json()) {
-        pending.erase(id);
-        send(object({{L"id", js(id)}, {L"ok", jb(true)}, {L"result", result}}));
-    }
-    void failure(const std::string& id, const std::string& code, const std::string& message, Json detail = Json()) {
-        pending.erase(id);
-        send(object({{L"id", id.empty() ? Value::CreateNullValue() : js(id)}, {L"ok", jb(false)},
-            {L"error", object({{L"code", js(code)}, {L"message", js(message)}, {L"detail", detail}})}}));
-    }
-    void event(const std::shared_ptr<Browser>& b, const std::string& type, Json detail = Json()) {
-        send(object({{L"event", js(type)}, {L"browser_id", js(b->id)},
-            {L"state", js(mode_name(b->control.mode))}, {L"detail", detail}}));
-    }
-    bool expire(const std::shared_ptr<Browser>& b) {
-        if (!b->control.expire(now())) return false;
-        b->refresh(); event(b, "control_changed", object({{L"reason", js("lease_expired")}})); return true;
-    }
-    void revoke(const std::shared_ptr<Browser>& b, Mode mode, const std::string& reason) {
-        if (b->control.mode == Mode::closed || (b->control.mode == Mode::faulted && mode != Mode::closed)) return;
-        b->control.revoke(mode); b->refresh();
-        event(b, mode == Mode::paused ? "paused" : "control_changed", object({{L"reason", js(reason)}}));
-    }
-    void finish(const std::shared_ptr<Browser>& b, std::shared_ptr<Operation> op,
-                const std::string& code = "", const std::string& message = "", Json result = Json()) {
-        if (op->done) return;
-        b->sync_input();
-        op->done = true;
-        if (b->active == op) { b->active.reset(); b->control.end(); }
-        if (code.empty()) success(op->request, result);
-        else {
-            result.SetNamedValue(L"dispatched_steps", jn(static_cast<double>(op->dispatched)));
-            result.SetNamedValue(L"completed_steps", jn(static_cast<double>(op->completed)));
-            result.SetNamedValue(L"result_unknown", jb(op->dispatched > 0));
-            failure(op->request, code, message, result);
+void Host::finish_same_document_navigation(const std::shared_ptr<Page>& b) {
+    auto op = b->operation();
+    if (b->navigating || !op || op->kind != "navigate" || op->navigation_id != 0) return;
+    LPWSTR source = nullptr;
+    if (FAILED(b->view->get_Source(&source))) return;
+    auto actual = owned_text(source);
+    try {
+        if (canonical_uri(winrt::to_hstring(actual).c_str()) == op->navigation_target) {
+            navigation_succeeded(b, op, true);
+            event(b, "navigation_completed", object({{L"success", jb(true)}, {L"same_document", jb(true)}}));
         }
-        b->refresh();
-        if (b->control.mode == Mode::manual) event(b, "control_changed");
-        if (b->pending_manual && !b->closing) PostMessage(b->window, manual_navigation_message, 0, 0);
-    }
-    std::string gate(const std::shared_ptr<Browser>& b, const std::shared_ptr<Operation>& op) {
-        b->sync_input();
-        if (op->done || b->closing) return "browser_closed";
-        if (!connected) return "disconnected";
-        if (!IsWindowVisible(b->window) || IsIconic(b->window)) {
-            if (b->control.mode != Mode::paused) revoke(b, Mode::paused, "window_not_visible");
-        }
-        expire(b);
-        return b->control.check(op->token, now());
-    }
-    void close(const std::shared_ptr<Browser>& b, const std::string& reason) {
-        if (b->closing) return;
-        b->closing = true; b->control.revoke(Mode::closed);
-        keyboard_guard.remove(b->keyboard);
-        if (!b->creation.empty()) { failure(b->creation, "creation_failed", reason); b->creation.clear(); }
-        if (b->active) finish(b, b->active, "browser_closed", "Window closed; dispatched effects are not rolled back");
-        if (b->controller) b->controller->Close();
-        b->view.Reset(); b->controller.Reset(); b->environment.Reset();
-        if (b->window) { DestroyWindow(b->window); b->window = nullptr; }
-        event(b, "closed", object({{L"reason", js(reason)}}));
-        browsers.erase(b->id);
-        if (!connected && browsers.empty()) PostQuitMessage(0);
-    }
-    void fault(const std::shared_ptr<Browser>& b, const std::string& reason) {
-        if (b->closing) return;
-        revoke(b, Mode::faulted, reason);
-        if (!b->creation.empty()) { close(b, reason); return; }
-        if (b->active) finish(b, b->active, "browser_faulted", reason);
-        event(b, "faulted", object({{L"reason", js(reason)}}));
-    }
-    void disconnect() {
-        if (!connected) return;
-        connected = false;
-        auto copy = browsers;
-        for (auto& [id, b] : copy) {
-            revoke(b, Mode::manual, "disconnected");
-            if (!b->ready) close(b, "disconnected_during_creation");
-        }
-        if (browsers.empty()) PostQuitMessage(0);
-    }
-    void tick() {
-        auto copy = browsers;
-        for (auto& [id, b] : copy) {
-            b->sync_input();
-            expire(b);
-            if (!b->ready && now() - b->created > create_timeout) close(b, "initialization_timeout");
-            else if (b->active && now() - b->active->started > operation_timeout)
-                fault(b, "Operation timed out; dispatched effects may still complete. Close this browser to recover.");
-        }
-    }
-    void create(const std::string& request, const std::string& label);
-    void initialize(const std::shared_ptr<Browser>& b);
-    void navigation_succeeded(const std::shared_ptr<Browser>& b, const std::shared_ptr<Operation>& op, bool same_document) {
-        b->control.observed = false; ++b->revision;
-        op->completed = 1;
-        finish(b, op, "", "", object({{L"navigation_completed", jb(true)}, {L"same_document", jb(same_document)}}));
-    }
-    void finish_same_document_navigation(const std::shared_ptr<Browser>& b) {
-        auto op = b->active;
-        if (b->navigating || !op || op->kind != "navigate" || op->navigation_id != 0) return;
-        LPWSTR source = nullptr;
-        if (FAILED(b->view->get_Source(&source))) return;
-        auto actual = owned_text(source);
-        try {
-            if (canonical_uri(winrt::to_hstring(actual).c_str()) == op->navigation_target) {
-                navigation_succeeded(b, op, true);
-                event(b, "navigation_completed", object({{L"success", jb(true)}, {L"same_document", jb(true)}}));
-            }
-        } catch (...) { finish(b, op, "navigation_failed", "Could not compare the same-document navigation URL"); }
-    }
-    void handle(const std::string& line);
-    void observe(const std::shared_ptr<Browser>& b, const std::shared_ptr<Operation>& op);
-    void dispatch_step(const std::shared_ptr<Browser>& b, const std::shared_ptr<Operation>& op);
-};
+    } catch (...) { finish(b, op, "navigation_failed", "Could not compare the same-document navigation URL"); }
+}
 
-void Browser::layout() {
+void Page::layout() {
     if (!window) return;
     RECT bounds{}; GetClientRect(window, &bounds);
     if (toolbar) toolbar->layout();
@@ -225,38 +83,44 @@ void Browser::layout() {
         controller->put_IsVisible(IsWindowVisible(window) && !IsIconic(window));
     }
 }
-void Browser::refresh() {
-    if (!window || closing || !toolbar) return;
+void Page::refresh() {
+    auto session = owner();
+    if (!session || !window || closing || !toolbar) return;
     ShellState state;
-    state.mode = control.mode; state.ready = ready; state.connected = host->connected;
-    state.busy = control.busy; state.loading = navigating; state.notice = notice;
+    state.mode = owner()->control.mode; state.ready = ready; state.connected = host->connected;
+    state.busy = owner()->control.busy; state.loading = navigating; state.notice = notice;
     if (keyboard) keyboard->loading = navigating;
     if (view) {
         BOOL back = FALSE, forward = FALSE;
         view->get_CanGoBack(&back); view->get_CanGoForward(&forward);
         state.can_back = back != FALSE; state.can_forward = forward != FALSE;
+        LPWSTR caption = nullptr;
+        if (SUCCEEDED(view->get_DocumentTitle(&caption))) {
+            auto title = session->label + " | " + owned_text(caption) + " | Distinct Browser";
+            SetWindowText(window, winrt::to_hstring(title).c_str());
+        }
     }
     toolbar->update(state);
 }
-void Browser::sync_input() {
-    if (keyboard && keyboard->pending.exchange(false)) human_input();
+void Page::sync_input() {
+    if (auto session = owner()) session->sync_input();
 }
-void Browser::human_input() {
-    if (closing || !ready || (control.mode != Mode::automatic && control.mode != Mode::available)) return;
+void Page::human_input() {
+    if (closing || !ready || (owner()->control.mode != Mode::automatic && owner()->control.mode != Mode::available)) return;
     notice.clear();
     host->revoke(shared_from_this(), Mode::manual, "human_input");
 }
-void Browser::user_command(ShellCommand command) {
+void Page::user_command(ShellCommand command) {
     sync_input();
-    if (closing || !ready || control.mode == Mode::faulted) return;
+    if (closing || !ready || owner()->control.mode == Mode::faulted) return;
     auto self = shared_from_this();
     if (command == ShellCommand::takeover) {
-        if (control.mode == Mode::manual || control.mode == Mode::paused) {
-            if (host->connected && IsWindowVisible(window) && !IsIconic(window) && control.hand_back().empty()) {
-                notice.clear(); refresh(); host->event(self, "control_changed", object({{L"reason", js("hand_back")}}));
+        if (owner()->control.mode == Mode::manual || owner()->control.mode == Mode::paused) {
+            if (host->connected && owner()->visible() && owner()->control.hand_back().empty()) {
+                notice.clear(); owner()->refresh(); host->event(self, "control_changed", object({{L"reason", js("hand_back")}}));
                 controller->MoveFocus(COREWEBVIEW2_MOVE_FOCUS_REASON_PROGRAMMATIC);
             }
-        } else if (control.mode == Mode::automatic || control.mode == Mode::available)
+        } else if (owner()->control.mode == Mode::automatic || owner()->control.mode == Mode::available)
             host->revoke(self, Mode::manual, "takeover");
         return;
     }
@@ -287,14 +151,14 @@ void Browser::user_command(ShellCommand command) {
         pending_address = std::move(*url);
     }
     pending_manual = command;
-    if (active) {
-        if (active->kind == "navigate") view->Stop();
+    if (operation()) {
+        if (operation()->kind == "navigate") view->Stop();
     } else drain_manual();
 }
-void Browser::drain_manual() {
-    if (!pending_manual || control.busy) return;
+void Page::drain_manual() {
+    if (!pending_manual || owner()->control.busy) return;
     auto command = *pending_manual; pending_manual.reset();
-    if (closing || !ready || control.mode != Mode::manual || !IsWindowVisible(window) || IsIconic(window)) return;
+    if (closing || !ready || owner()->control.mode != Mode::manual || !IsWindowVisible(window) || IsIconic(window)) return;
     HRESULT hr = S_OK;
     if (command == ShellCommand::navigate) hr = view->Navigate(pending_address.c_str());
     else if (command == ShellCommand::back) hr = view->GoBack();
@@ -305,10 +169,10 @@ void Browser::drain_manual() {
     refresh();
 }
 
-static LRESULT CALLBACK BrowserProc(HWND window, UINT message, WPARAM wparam, LPARAM lparam) {
-    auto b = reinterpret_cast<Browser*>(GetWindowLongPtr(window, GWLP_USERDATA));
+LRESULT CALLBACK PageProc(HWND window, UINT message, WPARAM wparam, LPARAM lparam) {
+    auto b = reinterpret_cast<Page*>(GetWindowLongPtr(window, GWLP_USERDATA));
     if (message == WM_NCCREATE) {
-        b = static_cast<Browser*>(reinterpret_cast<CREATESTRUCT*>(lparam)->lpCreateParams);
+        b = static_cast<Page*>(reinterpret_cast<CREATESTRUCT*>(lparam)->lpCreateParams);
         b->window = window;
         SetWindowLongPtr(window, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(b));
     }
@@ -317,6 +181,10 @@ static LRESULT CALLBACK BrowserProc(HWND window, UINT message, WPARAM wparam, LP
         LRESULT result = 0;
         if (b->toolbar && b->toolbar->parent_message(message, wparam, lparam, result)) return result;
         switch (message) {
+        case WM_ACTIVATE:
+            if (LOWORD(wparam) != WA_INACTIVE && b->ready && !b->closing)
+                b->host->select(b->shared_from_this(), "window_activated");
+            break;
         case WM_SYSCOMMAND:
             if ((wparam & 0xFFF0) == SC_KEYMENU && b->keyboard && b->keyboard->suppress_key_menu.exchange(false)) {
                 return 0;
@@ -347,7 +215,7 @@ static LRESULT CALLBACK BrowserProc(HWND window, UINT message, WPARAM wparam, LP
         case WM_SIZE:
             if (wparam == SIZE_MINIMIZED && !b->closing)
                 b->host->revoke(b->shared_from_this(), Mode::paused, "minimized");
-            b->control.observed = false; ++b->revision;
+            b->invalidate();
             b->layout(); return 0;
         case WM_SHOWWINDOW:
             if (!wparam && !b->closing) b->host->revoke(b->shared_from_this(), Mode::paused, "hidden");
@@ -368,82 +236,8 @@ static LRESULT CALLBACK BrowserProc(HWND window, UINT message, WPARAM wparam, LP
     return DefWindowProc(window, message, wparam, lparam);
 }
 
-void Host::create(const std::string& request, const std::string& label) {
-    auto options = Microsoft::WRL::Make<CoreWebView2EnvironmentOptions>();
-    checked(options->put_ReleaseChannels(COREWEBVIEW2_RELEASE_CHANNELS_STABLE), "ReleaseChannels");
-    LPWSTR version = nullptr;
-    HRESULT hr = GetAvailableCoreWebView2BrowserVersionStringWithOptions(nullptr, options.Get(), &version);
-    CoTaskMemFree(version);
-    if (FAILED(hr)) throw Error("runtime_missing", "Install Microsoft Edge WebView2 Runtime (Evergreen x64)");
-    auto b = std::make_shared<Browser>(); b->host = this; b->id = guid(); b->label = label; b->creation = request;
-    browsers.emplace(b->id, b);
-    auto title = winrt::to_hstring(label + " | Distinct Browser");
-    b->window = CreateWindowEx(0, L"DistinctBrowserWindow", title.c_str(), WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN,
-        CW_USEDEFAULT, CW_USEDEFAULT, 1000, 760, nullptr, nullptr, GetModuleHandle(nullptr), b.get());
-    if (!b->window) { close(b, "CreateWindowEx failed"); return; }
-    b->toolbar = std::make_unique<NativeToolbar>();
-    std::weak_ptr<Browser> weak = b;
-    hr = b->toolbar->create(b->window, [weak](ShellCommand command) {
-        if (auto b = weak.lock()) b->user_command(command);
-    });
-    if (FAILED(hr)) { close(b, "Native toolbar initialization failed"); return; }
-    // A separate native page container gives input ownership an explicit HWND
-    // boundary, excluding toolbar controls and unrelated browser windows.
-    b->page_window = CreateWindowEx(0, L"DistinctBrowserPage", L"", WS_CHILD | WS_VISIBLE | WS_CLIPCHILDREN,
-        0, 0, 0, 0, b->window, reinterpret_cast<HMENU>(static_cast<INT_PTR>(page_host_id)), GetModuleHandle(nullptr), nullptr);
-    if (!b->page_window) { close(b, "Page input window creation failed"); return; }
-    b->keyboard = keyboard_guard.add(b->window, b->page_window);
-    ShowWindow(b->window, SW_SHOWNOACTIVATE); b->layout();
-    b->profile = data_root / winrt::to_hstring(b->id).c_str();
-    hr = CreateCoreWebView2EnvironmentWithOptions(nullptr, b->profile.c_str(), options.Get(),
-        Callback<ICoreWebView2CreateCoreWebView2EnvironmentCompletedHandler>([this, b](HRESULT error, ICoreWebView2Environment* env) -> HRESULT {
-            if (b->closing) return S_OK;
-            if (FAILED(error) || !env) { close(b, "WebView2 environment initialization failed"); return S_OK; }
-            // Machine policy/environment overrides can replace userDataFolder.
-            // Fail creation rather than silently sharing a profile.
-            ComPtr<ICoreWebView2Environment7> environment7;
-            LPWSTR actual = nullptr;
-            if (FAILED(env->QueryInterface(IID_PPV_ARGS(&environment7))) || FAILED(environment7->get_UserDataFolder(&actual))) {
-                close(b, "Cannot verify independent user data directory"); return S_OK;
-            }
-            fs::path actual_path(actual); CoTaskMemFree(actual);
-            std::error_code actual_error, expected_error;
-            auto actual_normal = fs::weakly_canonical(actual_path, actual_error);
-            auto expected_normal = fs::weakly_canonical(b->profile, expected_error);
-            if (actual_error || expected_error || CompareStringOrdinal(actual_normal.c_str(), -1, expected_normal.c_str(), -1, TRUE) != CSTR_EQUAL) {
-                close(b, "User data directory was overridden; independent browser isolation is unavailable"); return S_OK;
-            }
-            b->environment = env;
-            ComPtr<ICoreWebView2Environment10> environment10;
-            ComPtr<ICoreWebView2ControllerOptions> controller_options;
-            ComPtr<ICoreWebView2ControllerOptions4> input_options;
-            if (FAILED(env->QueryInterface(IID_PPV_ARGS(&environment10))) ||
-                FAILED(environment10->CreateCoreWebView2ControllerOptions(&controller_options)) ||
-                FAILED(controller_options.As(&input_options)) ||
-                FAILED(input_options->put_AllowHostInputProcessing(TRUE))) {
-                close(b, "WebView2 Runtime lacks host input processing; update Evergreen Runtime (138 or later)");
-                return S_OK;
-            }
-            HRESULT result = environment10->CreateCoreWebView2ControllerWithOptions(b->page_window, controller_options.Get(),
-                Callback<ICoreWebView2CreateCoreWebView2ControllerCompletedHandler>([this, b](HRESULT error, ICoreWebView2Controller* controller) -> HRESULT {
-                    if (b->closing) { if (controller) controller->Close(); return S_OK; }
-                    if (FAILED(error) || !controller) { close(b, "WebView2 controller initialization failed"); return S_OK; }
-                    try {
-                        b->controller = controller;
-                        checked(controller->get_CoreWebView2(&b->view), "get_CoreWebView2");
-                        initialize(b); b->layout();
-                        checked(b->view->Navigate(L"about:blank"), "initial navigation");
-                    } catch (...) { close(b, "WebView2 setup failed"); }
-                    return S_OK;
-                }).Get());
-            if (FAILED(result)) close(b, "WebView2 controller creation failed");
-            return S_OK;
-        }).Get());
-    if (FAILED(hr)) close(b, "WebView2 environment creation failed");
-}
-
-void Host::initialize(const std::shared_ptr<Browser>& b) {
-    std::weak_ptr<Browser> weak = b;
+void Host::initialize(const std::shared_ptr<Page>& b) {
+    std::weak_ptr<Page> weak = b;
     EventRegistrationToken registration{};
     // Host input processing lets the normal message loop handle shortcuts
     // before WebView2. AcceleratorKeyPressed is asynchronous in this mode.
@@ -459,10 +253,10 @@ void Host::initialize(const std::shared_ptr<Browser>& b) {
     checked(b->view->add_NavigationStarting(Callback<ICoreWebView2NavigationStartingEventHandler>(
         [this, weak](ICoreWebView2*, ICoreWebView2NavigationStartingEventArgs* args) -> HRESULT {
             if (auto b = weak.lock(); b && !b->closing) {
-                b->navigating = true; ++b->revision; b->control.observed = false;
+                b->navigating = true; b->invalidate();
                 b->notice.clear();
                 args->get_NavigationId(&b->navigation_id);
-                auto op = b->active;
+                auto op = b->operation();
                 if (op && op->kind == "navigate") {
                     if (op->navigation_id == 0) {
                         LPWSTR uri = nullptr;
@@ -490,15 +284,9 @@ void Host::initialize(const std::shared_ptr<Browser>& b) {
             BOOL ok = FALSE; args->get_IsSuccess(&ok);
             if (!b->ready && latest) {
                 if (!ok) { close(b, "Initial navigation failed"); return S_OK; }
-                b->ready = true;
-                auto id = std::exchange(b->creation, "");
-                UINT32 process_id = 0; b->view->get_BrowserProcessId(&process_id);
-                success(id, object({{L"browser_id", js(b->id)}, {L"hwnd", js(std::to_string(reinterpret_cast<uintptr_t>(b->window)))},
-                    {L"browser_process_id", jn(process_id)},
-                    {L"state", js(mode_name(b->control.mode))}}));
-                b->refresh(); event(b, "created");
+                ready_page(b);
             }
-            auto op = b->active;
+            auto op = b->operation();
             // Settle the request by its own ID, independently of which document
             // now owns the browser's loading state. Old completions cannot clear
             // the replacement navigation's loading flag.
@@ -525,7 +313,7 @@ void Host::initialize(const std::shared_ptr<Browser>& b) {
     checked(b->view->add_SourceChanged(Callback<ICoreWebView2SourceChangedEventHandler>(
         [this, weak](ICoreWebView2* view, ICoreWebView2SourceChangedEventArgs* args) -> HRESULT {
             if (auto b = weak.lock(); b && !b->closing) {
-                b->control.observed = false; ++b->revision;
+                b->invalidate();
                 LPWSTR source = nullptr;
                 if (SUCCEEDED(view->get_Source(&source))) {
                     if (b->toolbar) b->toolbar->set_url(source);
@@ -544,7 +332,7 @@ void Host::initialize(const std::shared_ptr<Browser>& b) {
             // SourceChanged event. A same-URL full document reload must still
             // wait for its NavigationStarting/Completed sequence.
             if (auto b = weak.lock(); b && !b->closing) {
-                if (b->active && b->active->navigation_target.find(L'#') != std::wstring::npos)
+                if (b->operation() && b->operation()->navigation_target.find(L'#') != std::wstring::npos)
                     finish_same_document_navigation(b);
                 b->refresh();
             }
@@ -554,11 +342,16 @@ void Host::initialize(const std::shared_ptr<Browser>& b) {
         [this, weak](ICoreWebView2*, ICoreWebView2NewWindowRequestedEventArgs* args) -> HRESULT {
             args->put_Handled(TRUE);
             if (auto b = weak.lock(); b && !b->closing) {
-                LPWSTR uri = nullptr; args->get_Uri(&uri);
-                event(b, "popup_blocked", object({{L"url", js(owned_text(uri))}}));
+                try { new_window(b, args); }
+                catch (...) { event(b->owner(), "page_creation_failed", object({{L"opener_page_id", js(b->id)}, {L"reason", js("new_window_setup_failed")}})); }
             }
             return S_OK;
         }).Get(), &registration), "NewWindowRequested");
+    checked(b->view->add_DocumentTitleChanged(Callback<ICoreWebView2DocumentTitleChangedEventHandler>(
+        [weak](ICoreWebView2*, IUnknown*) -> HRESULT {
+            if (auto page = weak.lock(); page && !page->closing) page->refresh();
+            return S_OK;
+        }).Get(), &registration), "DocumentTitleChanged");
     checked(b->view->add_ProcessFailed(Callback<ICoreWebView2ProcessFailedEventHandler>(
         [this, weak](ICoreWebView2*, ICoreWebView2ProcessFailedEventArgs*) -> HRESULT {
             if (auto b = weak.lock()) fault(b, "WebView2 process failed; no automatic action was retried");
@@ -580,7 +373,7 @@ static std::string base64(const BYTE* bytes, DWORD count) {
         throw Error("capture_failed", "Cannot encode image");
     text.resize(length); return text;
 }
-void Host::observe(const std::shared_ptr<Browser>& b, const std::shared_ptr<Operation>& op) {
+void Host::observe(const std::shared_ptr<Page>& b, const std::shared_ptr<Operation>& op) {
     if (b->navigating) { finish(b, op, "page_loading", "Wait for navigation_completed and observe again"); return; }
     op->revision = b->revision;
     auto error = gate(b, op);
@@ -604,7 +397,7 @@ void Host::observe(const std::shared_ptr<Browser>& b, const std::shared_ptr<Oper
                             checked(error, "CapturePreview");
                             auto denied = gate(b, op);
                             if (!denied.empty()) { finish(b, op, denied, "Control revoked during capture"); return S_OK; }
-                            if (op->revision != b->revision || b->navigating) {
+                            if (op->revision != b->revision || op->selection_revision != b->owner()->selection_revision || b->navigating) {
                                 finish(b, op, "page_changed", "Page navigated or viewport changed during observation; observe again"); return S_OK;
                             }
                             STATSTG info{}; checked(stream->Stat(&info, STATFLAG_NONAME), "IStream::Stat");
@@ -626,10 +419,10 @@ void Host::observe(const std::shared_ptr<Browser>& b, const std::shared_ptr<Oper
                             Json image = object({{L"mime_type", js("image/png")}, {L"base64", js(base64(bytes.data(), read))},
                                 {L"width", jn(dimension(16))}, {L"height", jn(dimension(20))}});
                             b->viewport_width = width; b->viewport_height = height;
-                            b->control.observed = true;
-                            finish(b, op, "", "", object({{L"url", js(source)}, {L"title", js(caption)},
+                            b->owner()->control.observed = true;
+                            finish(b, op, "", "", object({{L"page_id", js(b->id)}, {L"url", js(source)}, {L"title", js(caption)},
                                 {L"viewport", object({{L"width", jn(width)}, {L"height", jn(height)}, {L"coordinate_space", js("css_viewport")}})},
-                                {L"image", image}, {L"state", js(mode_name(b->control.mode))}}));
+                                {L"image", image}, {L"state", js(mode_name(b->owner()->control.mode))}}));
                         } catch (const Error& e) { finish(b, op, e.code, e.what()); }
                         catch (...) { finish(b, op, "observation_failed", "Capture or metadata failed"); }
                         return S_OK;
@@ -641,7 +434,7 @@ void Host::observe(const std::shared_ptr<Browser>& b, const std::shared_ptr<Oper
     if (FAILED(hr)) finish(b, op, "observation_failed", "Viewport observation could not start");
 }
 
-void Host::dispatch_step(const std::shared_ptr<Browser>& b, const std::shared_ptr<Operation>& op) {
+void Host::dispatch_step(const std::shared_ptr<Page>& b, const std::shared_ptr<Operation>& op) {
     if (op->done) return;
     b->sync_input();
     // The callback of the last dispatched step is always recorded, including
@@ -649,11 +442,11 @@ void Host::dispatch_step(const std::shared_ptr<Browser>& b, const std::shared_pt
     if (op->completed == op->steps.size()) {
         expire(b);
         finish(b, op, "", "", object({{L"command_processed", jb(true)}, {L"business_success_verified", jb(false)},
-            {L"control_still_valid", jb(b->control.check(op->token, now()).empty())}})); return;
+            {L"control_still_valid", jb(b->owner()->control.check(op->token, now()).empty())}})); return;
     }
     auto error = gate(b, op);
     if (!error.empty()) { finish(b, op, error, "Control revoked; remaining steps were not dispatched"); return; }
-    if (op->revision != b->revision || b->navigating) {
+    if (op->revision != b->revision || op->selection_revision != b->owner()->selection_revision || b->navigating) {
         finish(b, op, "page_changed", "Page or viewport changed; remaining steps were not dispatched"); return;
     }
     auto& step = op->steps[op->completed];
@@ -687,48 +480,88 @@ void Host::handle(const std::string& line) {
         pending.insert(id);
         auto method = string(request, L"method", 32);
         if (method != "create" && method != "close" && method != "present" && method != "acquire"
-            && method != "renew" && method != "release" && method != "observe" && method != "act")
+            && method != "renew" && method != "release" && method != "observe" && method != "act"
+            && method != "list_pages" && method != "select_page" && method != "close_page")
             throw Error("unknown_method", "Unknown method");
         Json parameters = request.HasKey(L"params") ? request.GetNamedObject(L"params") : Json();
         if (method == "create") { create(id, string(parameters, L"label", 256)); return; }
         auto browser_id = string(parameters, L"browser_id", 128);
         auto found = browsers.find(browser_id);
         if (found == browsers.end()) throw Error("browser_not_found", "Browser does not exist or has been closed");
-        auto b = found->second;
-        b->sync_input();
-        if (method == "close") { close(b, "caller_closed"); success(id); return; }
-        if (!b->ready) throw Error("browser_not_ready", "Browser is still initializing");
+        auto session = found->second;
+        session->sync_input();
+        if (method == "close") { close_browser(session, "caller_closed"); success(id); return; }
+        if (!session->ready) throw Error("browser_not_ready", "Browser is still initializing");
+        auto b = session->selected;
+        if (!b) throw Error("browser_not_ready", "No ready page");
         expire(b);
+        if (method == "list_pages") {
+            winrt::Windows::Data::Json::JsonArray pages;
+            for (auto& [page_id, page] : session->pages) {
+                LPWSTR source = nullptr, title = nullptr;
+                if (page->view) { page->view->get_Source(&source); page->view->get_DocumentTitle(&title); }
+                pages.Append(object({{L"page_id", js(page_id)}, {L"opener_page_id", js(page->opener_id)},
+                    {L"url", js(owned_text(source))}, {L"title", js(owned_text(title))},
+                    {L"hwnd", js(std::to_string(reinterpret_cast<uintptr_t>(page->window)))},
+                    {L"ready", jb(page->ready)}, {L"loading", jb(page->navigating)}}));
+            }
+            success(id, object({{L"selected_page_id", js(b->id)}, {L"pages", pages}})); return;
+        }
         if (method == "present") {
+            if (parameters.HasKey(L"page_id")) {
+                auto page = session->pages.find(string(parameters, L"page_id", 128));
+                if (page == session->pages.end()) throw Error("page_not_found", "Page does not belong to this browser or was closed");
+                b = page->second;
+                if (!b->ready) throw Error("page_not_ready", "Page is initializing");
+                select(b, "presented");
+            }
             ShowWindow(b->window, IsIconic(b->window) ? SW_RESTORE : SW_SHOW);
             b->layout();
             bool foreground = SetForegroundWindow(b->window) != FALSE;
             success(id, object({{L"visible", jb(IsWindowVisible(b->window) != FALSE)},
-                {L"foreground", jb(foreground)}, {L"state", js(mode_name(b->control.mode))}})); return;
+                {L"foreground", jb(foreground)}, {L"state", js(mode_name(session->control.mode))}})); return;
         }
         if (method == "acquire") {
-            if (!IsWindowVisible(b->window) || IsIconic(b->window)) throw Error("window_paused", "Present the browser and hand back control first");
+            if (!session->visible()) throw Error("window_paused", "Present the browser pages and hand back control first");
             auto client = string(parameters, L"client_id", 128);
             double ttl = parameters.HasKey(L"ttl_ms") ? number(parameters, L"ttl_ms", 1000, 300000) : 30000;
             auto token = guid();
-            auto error = b->control.acquire(client, token, now(), static_cast<uint64_t>(ttl));
+            auto error = b->owner()->control.acquire(client, token, now(), static_cast<uint64_t>(ttl));
             if (!error.empty()) throw Error(error, "Browser is occupied or does not allow automatic control");
-            b->refresh(); event(b, "control_changed");
+            session->refresh(); event(b, "control_changed");
             success(id, object({{L"token", js(token)}, {L"ttl_ms", jn(ttl)}})); return;
         }
-        if (method != "renew" && method != "release" && method != "observe" && method != "act")
+        if (method != "renew" && method != "release" && method != "observe" && method != "act" && method != "select_page" && method != "close_page")
             throw Error("unknown_method", "Unknown method");
         auto token = string(parameters, L"token", 128);
-        auto error = b->control.check(token, now());
+        auto error = b->owner()->control.check(token, now());
         if (!error.empty()) throw Error(error, "Lease is invalid, expired or revoked");
         if (method == "renew") {
             double ttl = parameters.HasKey(L"ttl_ms") ? number(parameters, L"ttl_ms", 1000, 300000) : 30000;
-            b->control.expires = now() + static_cast<uint64_t>(ttl);
+            b->owner()->control.expires = now() + static_cast<uint64_t>(ttl);
             success(id, object({{L"ttl_ms", jn(ttl)}})); return;
         }
         if (method == "release") { revoke(b, Mode::available, "released"); success(id); return; }
+        if (method == "select_page" || method == "close_page" || parameters.HasKey(L"page_id")) {
+            auto page_id = string(parameters, L"page_id", 128);
+            auto page = session->pages.find(page_id);
+            if (page == session->pages.end()) throw Error("page_not_found", "Page does not belong to this browser or was closed");
+            if (method == "select_page" || method == "close_page") {
+                if (session->control.busy) throw Error("busy", "A browser operation is still in flight");
+                b = page->second;
+                if (method == "close_page") { close(b, "caller_closed_page"); success(id); return; }
+                if (!b->ready) throw Error("page_not_ready", "Page is initializing");
+                select(b, "caller_selected");
+                ShowWindow(b->window, IsIconic(b->window) ? SW_RESTORE : SW_SHOW);
+                b->layout();
+                bool foreground = SetForegroundWindow(b->window) != FALSE;
+                success(id, object({{L"page_id", js(b->id)}, {L"foreground", jb(foreground)}})); return;
+            }
+            if (page->second != b) throw Error("page_not_selected", "Select this page and observe before acting");
+        }
         auto op = std::make_shared<Operation>();
         op->request = id; op->token = token; op->kind = method; op->revision = b->revision;
+        op->page = b; op->selection_revision = b->owner()->selection_revision;
         std::wstring destination;
         if (method == "act") {
             auto action = parameters.GetNamedObject(L"action");
@@ -773,9 +606,9 @@ void Host::handle(const std::string& line) {
                 }
             } else throw Error("invalid_action", "Supported actions: navigate, click, scroll, text, key");
         }
-        error = b->control.begin(token, now(), method == "act");
+        error = b->owner()->control.begin(token, now(), method == "act");
         if (!error.empty()) throw Error(error, "Observe first, or wait for the current operation to finish");
-        b->active = op;
+        b->owner()->active = op;
         if (method == "observe") { observe(b, op); return; }
         error = gate(b, op);
         if (!error.empty()) { finish(b, op, error, "Control unavailable at dispatch"); return; }
@@ -824,7 +657,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
         PWSTR local = nullptr; checked(SHGetKnownFolderPath(FOLDERID_LocalAppData, 0, nullptr, &local), "LocalAppData");
         host.data_root = fs::path(local) / L"DistinctBrowser" / L"Profiles";
         CoTaskMemFree(local); fs::create_directories(host.data_root);
-        WNDCLASS window_class{}; window_class.lpfnWndProc = BrowserProc; window_class.hInstance = instance;
+        WNDCLASS window_class{}; window_class.lpfnWndProc = PageProc; window_class.hInstance = instance;
         window_class.hIcon = LoadIcon(instance, MAKEINTRESOURCE(2));
         window_class.hCursor = LoadCursor(nullptr, IDC_ARROW); window_class.hbrBackground = reinterpret_cast<HBRUSH>(COLOR_WINDOW + 1);
         window_class.lpszClassName = L"DistinctBrowserWindow";
@@ -878,7 +711,8 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
             bool handled = false;
             bool capture_page_drag = false;
             HWND root = GetAncestor(message.hwnd, GA_ROOT);
-            for (auto& [id, browser] : host.browsers) {
+            for (auto& [id, session] : host.browsers) {
+              for (auto& [page_id, browser] : session->pages) {
                 if (browser->window != root) continue;
                 const bool page = message.hwnd == browser->page_window || IsChild(browser->page_window, message.hwnd);
                 capture_page_drag = page && GetForegroundWindow() == root &&
@@ -887,6 +721,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
                     browser->human_input();
                 if (browser->toolbar) handled = browser->toolbar->pre_translate(message);
                 break;
+              }
             }
             if (!handled) { TranslateMessage(&message); DispatchMessage(&message); }
             // With host input processing some runtimes lose the renderer's

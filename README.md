@@ -1,6 +1,8 @@
-# Distinct Browser · v0.3 Human–Agent Collaboration
+# Distinct Browser · v0.4 Multi-page Browsing
 
 一个 Windows 11 x64 原生浏览器宿主：C++17、Win32 窗口、系统 WebView2 Runtime。每个浏览器有真实窗口、独立数据目录和控制权状态。一个进程可以代表多个逻辑调用者，通过重定向的 stdin/stdout 发送 UTF-8 JSON 行。
+
+v0.4 支持同一浏览器会话中的多个页面。网页的新窗口请求会创建受管理的原生窗口，保留来源页并共享所属会话的登录环境；每页有独立 `page_id`，租约仍属于浏览器。新增 `list_pages`、`select_page`、`close_page`，观察和动作可指定页面，切换后必须重新观察。继续兼容不指定页面的 JSONL v1 调用；首版不增加标签栏或新的 UI 框架。
 
 交付文件是 `build/distinct-browser.exe`。静态链接 WebView2 Loader 和 MSVC CRT，无需旁带 Loader DLL、VC++ Redistributable 或 .NET；机器仍须安装支持宿主输入处理的 WebView2 Evergreen Runtime（138 或更高版本，创建时检查接口能力）。SDK 是构建依赖，Python 只用于演示和验收。
 
@@ -47,6 +49,7 @@ ctest --test-dir build/cmake -C Release --output-on-failure
 ```powershell
 ./scripts/build.ps1
 python tests/integration.py
+python tests/pages.py
 python tests/navigation.py
 python tests/shell.py
 python tests/collaboration.py
@@ -62,7 +65,9 @@ python tests/failures.py
 - 双窗口并行、独立 Cookie / localStorage、真实 DOM 输入与点击、系统鼠标位置保持。
 - 截图及 CSS 视口、展示原页面、共享控制、重新观察、原生按钮接管、已发导航收尾。
 - 最小化 / 隐藏、恢复后交还、租约到期与续期、关闭后标识失效、断连保留人工窗口。
-- 弹窗阻止、畸形 JSON、分片 UTF-8、行大小限制和 EOF。
+- 关联弹窗、`target=_blank`、命名窗口复用、空白弹窗、来源通信、会话内登录数据共享和会话间隔离。
+- 页面身份、切换后旧观察拒绝、跨页互斥、子页接管、在途子页关闭、16 页上限和多页断连收尾。
+- 畸形 JSON、分片 UTF-8、行大小限制和 EOF；Deferral 在超时、来源关闭、会话关闭及延迟回调中只结算一次。
 - 同文档锚点跳转、重复锚点、移除锚点、HTTP 重定向、页面取消和后续导航取代时的准确收尾。
 - Runtime 缺失、用户数据目录被配置覆盖、测试专属 WebView2 进程故障、操作超时。
 - 原生工具栏导航、Cookie / localStorage 保留、旧令牌失效、在途操作收尾、加载反馈、窗口缩放、中文选择编辑、IME 确认键保护及快捷键处理路径。
@@ -75,7 +80,7 @@ python tests/failures.py
 
 ## 使用边界
 
-每个窗口只有一个页面；额外弹窗会被阻止并报告。自动操作仅提供导航、坐标点击、文字、有限命名按键和滚动，不开放任意脚本或通用 CDP 调用。网页原生输入、进入地址栏及工具栏导航都会撤销自动令牌；仍可使用“接管 / 交还”按钮。`WH_KEYBOARD_LL` 是系统层全局键盘钩子，先确认焦点属于本进程窗口再读取按键，其他应用直接放行；v0.3.2 将它移至独立消息线程，UI 在派发前消化原子撤权标记。不监听网页脚本，也不使用全局鼠标钩子。
+每页一个原生窗口，每浏览器最多 16 页，共享浏览器控制权。新页复用来源 Environment / 默认 Profile，不跨浏览器共享数据目录。自动操作仅提供导航、坐标点击、文字、有限命名按键和滚动，不开放任意脚本或通用 CDP 调用。网页原生输入、进入地址栏及工具栏导航都会撤销整个浏览器的自动令牌；仍可使用“接管 / 交还”按钮。`WH_KEYBOARD_LL` 是系统层全局键盘钩子，先确认焦点属于本进程窗口再读取按键，其他应用直接放行；独立消息线程通过每页原子标记将人工输入交给所属浏览器统一撤权。不监听网页脚本，也不使用全局鼠标钩子。
 
 同一浏览器只接受一个在途操作；并发请求收到 `busy`，不积压动作，也不自动重试。不同浏览器可以各自等待异步结果。操作已处理不代表网页业务成功，调用者需要观察结果。
 
@@ -83,6 +88,6 @@ python tests/failures.py
 
 用户数据位于 `%LOCALAPPDATA%/DistinctBrowser/Profiles/<browser_id>/`。关闭不会自动删除这些目录，当前版本不支持进程重启后恢复原标识；如需清理，应在相关宿主和 WebView2 进程退出后处理。
 
-完整接口见 [协议](docs/protocol.md)，实现边界见 [设计](docs/design.md)。
+完整接口及当前行为边界见 [协议](docs/protocol.md)。
 
-源码提交后可用 `./scripts/package.ps1 -DesktopValidation artifacts/desktop-validation.json -KeyboardStability artifacts/keyboard-stability.json` 打包单 EXE、`SHA256SUMS.txt`、`artifact.json` 和与 EXE 摘要一致的验收报告，输出到 `artifacts/releases/v0.3.2/`。报告参数可省略；提供时摘要不符会拒绝打包。不要分发测试用的 `toolbar-component.exe`。
+源码提交后可用 `./scripts/package.ps1` 打包单 EXE、`SHA256SUMS.txt`、`artifact.json`，输出到 `artifacts/releases/v0.4.0/`。`-DesktopValidation`、`-KeyboardStability` 可附加与当前 EXE 摘要一致的验收报告，摘要不符会拒绝打包；不能复用旧版 EXE 的报告充当新版验收。不要分发测试用的 `toolbar-component.exe` 或 `lifecycle-tests.exe`。

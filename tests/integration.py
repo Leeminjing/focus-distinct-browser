@@ -156,14 +156,17 @@ def run():
 
         act(pa4, "click", x=80, y=152)
         deadline = time.monotonic() + 5
-        blocked = False
+        popup = None
         while time.monotonic() < deadline:
             event = client.events.get(timeout=5)
-            if event["event"] == "popup_blocked" and event.get("browser_id") == a:
-                blocked = True
+            if (event["event"] == "page_created" and event.get("browser_id") == a
+                    and event.get("detail", {}).get("opener_page_id") == made[0]["page_id"]):
+                popup = event["detail"]["page_id"]
                 break
-        assert blocked
-        passed("popup is blocked and explicitly reported")
+        assert popup
+        client.call("close_page", **pa4, page_id=popup)
+        client.call("observe", **pa4)
+        passed("popup is managed within the browser; closing it preserves the original page")
 
         # Restoring only changes visibility; explicit hand-back is still needed.
         user32.ShowWindow(handles[0], 6)

@@ -1,6 +1,6 @@
 param(
     [string]$Executable = 'build/distinct-browser.exe',
-    [string]$Version = '0.3.2',
+    [string]$Version = '0.4.0',
     [string]$DesktopValidation,
     [string]$KeyboardStability
 )

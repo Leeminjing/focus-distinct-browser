@@ -47,11 +47,11 @@ try {
     if ($LASTEXITCODE) { throw 'Resource compilation failed' }
     $arguments = @('/nologo', '/std:c++17', '/O2', '/MT', '/EHsc', '/W4', '/utf-8', '/permissive-',
         '/DUNICODE', '/D_UNICODE', '/DNOMINMAX', '/DWIN32_LEAN_AND_MEAN', "/I$sdkRoot\build\native\include",
-        "/Fo$OutputDirectory/", "/Fe$OutputDirectory/distinct-browser.exe", 'src/main.cpp', 'src/host/host.cpp', 'src/browser/pages.cpp', 'src/browser/site_interactions.cpp', 'src/window/native_toolbar.cpp', "$OutputDirectory/app.res",
+        "/Fo$OutputDirectory/", "/Fe$OutputDirectory/distinct-browser.exe", 'src/main.cpp', 'src/host/host.cpp', 'src/host/reconnect.cpp', 'src/browser/pages.cpp', 'src/browser/site_interactions.cpp', 'src/window/native_toolbar.cpp', "$OutputDirectory/app.res",
         '/link', '/SUBSYSTEM:WINDOWS', '/DYNAMICBASE', '/NXCOMPAT',
         "$sdkRoot\build\native\x64\WebView2LoaderStatic.lib", 'user32.lib', 'gdi32.lib', 'ole32.lib',
         'oleaut32.lib', 'shlwapi.lib', 'shell32.lib', 'version.lib', 'windowsapp.lib', 'crypt32.lib',
-        'd2d1.lib', 'dwrite.lib', 'dwmapi.lib', 'comctl32.lib', 'advapi32.lib')
+        'd2d1.lib', 'dwrite.lib', 'dwmapi.lib', 'comctl32.lib', 'advapi32.lib', 'bcrypt.lib')
     & cl.exe @arguments
     if ($LASTEXITCODE) { throw 'C++ compilation failed' }
     if (-not $SkipTests) {

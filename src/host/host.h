@@ -1,6 +1,7 @@
 #pragma once
 #include "../browser/session.h"
 #include "pipe_output.h"
+#include "reconnect.h"
 #include <set>
 
 struct Host {
@@ -10,6 +11,11 @@ struct Host {
     std::map<std::string, std::shared_ptr<Browser>> browsers;
     std::set<std::string> pending;
     bool connected = true;
+    bool reconnectable = false;
+    std::string host_id;
+    uint64_t generation = 0, revision = 0;
+    std::shared_ptr<distinct::PipeConnection> connection;
+    distinct::ReconnectServer* recovery = nullptr;
     std::filesystem::path data_root;
     void send(distinct::Json message);
     void success(const std::string& id, distinct::Json result = distinct::Json());
@@ -25,6 +31,10 @@ struct Host {
     void close_browser(const std::shared_ptr<Browser>& browser, const std::string& reason);
     void fault(const std::shared_ptr<Page>& page, const std::string& reason);
     void disconnect();
+    bool connection_valid() const;
+    bool current_request(const std::string& id) const;
+    void transport(distinct::TransportMessage& message);
+    distinct::Json snapshot();
     void tick();
     void create(const std::string& request, const std::string& label);
     std::shared_ptr<Page> make_page(const std::shared_ptr<Browser>& browser, const std::string& opener = "");
@@ -35,7 +45,7 @@ struct Host {
     void initialize(const std::shared_ptr<Page>& page);
     void navigation_succeeded(const std::shared_ptr<Page>& page, const std::shared_ptr<Operation>& op, bool same_document);
     void finish_same_document_navigation(const std::shared_ptr<Page>& page);
-    void handle(const std::string& line);
+    void handle(const std::string& line, uint64_t source_generation = 0);
     void observe(const std::shared_ptr<Page>& page, const std::shared_ptr<Operation>& op);
     void dispatch_step(const std::shared_ptr<Page>& page, const std::shared_ptr<Operation>& op);
 };

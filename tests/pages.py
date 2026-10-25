@@ -48,7 +48,7 @@ report('loaded');
 
 
 class Fixture:
-    def __init__(self):
+    def __init__(self, html=HTML):
         self.records, self.commands = [], {}
         self.condition = threading.Condition()
         self.slow_started, self.slow_release = threading.Event(), threading.Event()
@@ -67,7 +67,7 @@ class Fixture:
                     with fixture.condition:
                         content = json.dumps(fixture.commands.pop(name, None)).encode()
                 else:
-                    content = HTML
+                    content = html
                 self.send_response(200)
                 self.send_header('Content-Type', 'text/html; charset=utf-8')
                 self.send_header('Content-Length', str(len(content)))

@@ -22,6 +22,35 @@
 
 ## 方法
 
+### 可选的存活宿主重连（v0.6 原型）
+
+无参数启动保持本协议的 stdin/stdout 行为。显式使用 `distinct-browser.exe --reconnect` 时，宿主创建本地命名管道和受保护的端点文件；若 stdout 是管道，输出一次引导事件：
+
+```json
+{"event":"ready","protocol_version":1,"transport":"named_pipe","pid":1234,"host_id":"...","endpoint":".../endpoint.json"}
+```
+
+这条引导事件不表示管理连接已建立。客户端保存端点路径，核对端点文件及目录的当前登录 SID 私有 DACL、协议、宿主 EXE 路径、PID 与进程创建时间，并保持进程句柄。调用方可另外固定 EXE SHA-256；演示客户端支持 `expected_sha256`。打开本地管道后，使用 `GetNamedPipeServerProcessId` 核对服务器进程，不能仅依赖文件中的 PID 或管道名称。
+
+端点中的 `credential_dpapi` 为 CurrentUser DPAPI 保护的随机凭据，不应记录到普通日志。首次管道帧为 `{host_id, protocol_version:1, credential}`，凭据需解保护后传入。握手上限 8 KiB、5 秒，失败直接断开且不提供浏览器信息。管道拒绝远程客户端，DACL 仅允许当前登录 SID 数据读写，不授予客户端创建服务器实例的权限。服务端还检查管道客户端进程的登录 SID。该边界不等于隔离同一登录用户下的恶意代码。
+
+同一时刻只有一个管理连接；第二连接收到 Windows 管道忙碌错误，不抢占现有管理者。认证成功后管理管道输出 `ready`，含稳定的 `host_id`、新 `connection_id` 和递增 `generation`。此后所有响应/事件带 `host_id`、`connection_id`、`revision`。`revision` 为宿主浏览器事件序号；客户端先缓冲事件，再以 `snapshot.revision` 为基线应用更新的事件，避免快照期间的订阅空隙。
+
+重连模式额外支持两个无需租约的方法：
+
+| method | params | result |
+| --- | --- | --- |
+| `snapshot` | 空对象 | `host_id`、`connection_id`、`revision`、全部存活 `browsers`；每项含 `browser_id`、`label`、`state`、`busy`、`selected_page_id`、`pages`、`site_interactions`、`interrupted_operation` |
+| `ping` | 空对象 | 空对象；保活，不授予控制 |
+
+快照中的页面含现有 `list_pages` 字段以及 `visible`、`minimized`。页面集合和元数据在 STA 上读取，不声称与截图、DOM 或网络状态原子一致。`interrupted_operation` 最多保留该浏览器最近一次断连时的操作类型、来源页、派发/完成步数、`result_unknown` 和 `settled`，不含旧令牌和旧请求编号。它不是可重试队列，`settled:true` 也不保证网页业务成功。
+
+客户端每 5 秒发送 `ping` 即可保活；连续 30 秒没有完整输入帧，或 EOF、输出失败、已验证客户端进程退出，均使连接失效。读取到半帧字节不会无限延长这一期限。失效标记先由传输线程设置，UI 下一次派发检查时就拒绝旧连接；已经发出的操作仍按真实结果收尾，不宣称撤回。断连取消下载和未决权限，保留就绪窗口；新连接读取真实终态，不重新请求。
+
+重连后仍是人工控制或接管中，旧租约和旧观察均无效。必须等待旧在途操作收尾、原生工具栏明确交还、新 `acquire`、新 `observe`，才能继续动作。旧代次的输入队列、响应及回调不能完成新代次的同编号请求。宿主存活期间保持原 `browser_id` / `page_id` / HWND，不重新导航或重建页面。宿主退出时端点失效；即使崩溃留下端点文件，客户端也须验证进程身份并报告不可恢复，不自动创建替代浏览器。
+
+跨用户 ACL 实机、物理设备及上层应用重连不在本原型自动化结果之内。
+
 | method | params | result / 行为 |
 | --- | --- | --- |
 | `create` | `label` | 在窗口、独立用户数据环境、Controller 和初始页面都可用后返回 `browser_id`、`page_id`、`hwnd`、`browser_process_id`、`state`；最长初始化等待 45 秒 |

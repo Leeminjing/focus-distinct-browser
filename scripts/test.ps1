@@ -28,6 +28,8 @@ try {
     if ($LASTEXITCODE) { throw 'Toolbar theme/DPI tests failed' }
     & python tests/protocol.py $Executable
     if ($LASTEXITCODE) { throw 'Protocol tests failed' }
+    & python tests/recovery.py $Executable
+    if ($LASTEXITCODE) { throw 'Session recovery tests failed' }
     & python tests/failures.py $Executable
     if ($LASTEXITCODE) { throw 'Failure tests failed' }
 } finally { Pop-Location }

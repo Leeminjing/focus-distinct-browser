@@ -193,7 +193,7 @@ def main():
         print('PASS opt-in reconnect endpoint')
         connection = reconnect(ready['endpoint'], executable)
         first_connection = connection.connection_id
-        browser = connection.call('create', label='Recovery prototype A')
+        browser = connection.call('create', label='Recovery A')
         bid, page, hwnd = browser['browser_id'], browser['page_id'], int(browser['hwnd'])
         token = connection.call('acquire', browser_id=bid, client_id='before')['token']
         connection.call('observe', browser_id=bid, token=token)
@@ -250,7 +250,7 @@ def main():
         handles = {p['page_id']: p['hwnd'] for p in listing['pages']}
         popup_state = fixture.wait(lambda r: r['name'] == 'recover-parent-child1' and r['kind'] == 'loaded')
         assert popup_state['cookie'] == state['cookie'] and popup_state['storage'] == state['storage']
-        other = connection.call('create', label='Recovery prototype B')
+        other = connection.call('create', label='Recovery B')
         token_b = connection.call('acquire', browser_id=other['browser_id'], client_id='independent')['token']
         connection.call('observe', browser_id=other['browser_id'], token=token_b)
         connection.call('act', browser_id=other['browser_id'], token=token_b, action={'type': 'navigate', 'url': fixture.url('independent')})

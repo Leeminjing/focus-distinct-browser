@@ -69,8 +69,40 @@ struct InteractionSetup : Setup {
     }
 };
 
+extern LRESULT CALLBACK PageProc(HWND, UINT, WPARAM, LPARAM);
+
 int main() {
     winrt::init_apartment(winrt::apartment_type::single_threaded);
+    {
+        // No injected keys: actual Win32 deactivation/reactivation must preserve
+        // the child that receives keyboard/IME input, including an edit selection.
+        Setup s;
+        WNDCLASSW type{}; type.hInstance = GetModuleHandleW(nullptr);
+        type.lpszClassName = L"DistinctFocusLifecycleTest"; type.lpfnWndProc = PageProc;
+        assert(RegisterClassW(&type));
+        s.root->window = CreateWindowW(type.lpszClassName, L"Owned focus lifecycle", WS_OVERLAPPEDWINDOW,
+            0, 0, 600, 400, nullptr, nullptr, type.hInstance, s.root.get());
+        HWND edit = CreateWindowW(L"EDIT", L"selection stays", WS_CHILD | WS_VISIBLE,
+            10, 10, 200, 30, s.root->window, nullptr, type.hInstance, nullptr);
+        HWND neighbour = CreateWindowW(L"STATIC", L"Owned focus neighbour", WS_OVERLAPPEDWINDOW,
+            620, 0, 200, 100, nullptr, nullptr, type.hInstance, nullptr);
+        assert(s.root->window && edit && neighbour);
+        ShowWindow(s.root->window, SW_SHOWNOACTIVATE); ShowWindow(neighbour, SW_SHOWNOACTIVATE);
+        SetActiveWindow(s.root->window); SetFocus(edit); SendMessageW(edit, EM_SETSEL, 1, 4);
+        assert(GetFocus() == edit);
+        SetActiveWindow(neighbour); SetActiveWindow(s.root->window);
+        bool restored = GetFocus() == edit && s.browser->control.mode == Mode::automatic &&
+            s.browser->control.check("lease", GetTickCount64(), false).empty();
+        DWORD start = 0, end = 0; SendMessageW(edit, EM_GETSEL, reinterpret_cast<WPARAM>(&start), reinterpret_cast<LPARAM>(&end));
+        DestroyWindow(neighbour); s.host.close_browser(s.browser, "test_cleanup");
+        UnregisterClassW(type.lpszClassName, type.hInstance);
+        if (!restored || start != 1 || end != 4) {
+            std::cerr << "FAIL activation must restore the original native child and selection, not focus the top-level window\n";
+            return 1;
+        }
+        std::cout << "PASS native activation restores child focus and edit selection\n";
+    }
+
     {
         auto probe = Microsoft::WRL::Make<DeferralProbe>();
         {

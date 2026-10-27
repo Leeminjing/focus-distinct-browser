@@ -22,19 +22,28 @@ struct Security {
     }
     ~Security() { if (descriptor) LocalFree(descriptor); }
 };
-std::wstring logon_sid(HANDLE process) {
+std::wstring token_sid(HANDLE token, TOKEN_INFORMATION_CLASS kind) {
+    DWORD size = 0;
+    GetTokenInformation(token, kind, nullptr, 0, &size);
+    std::vector<BYTE> bytes(size);
+    if (!size || !GetTokenInformation(token, kind, bytes.data(), size, &size))
+        throw Error("endpoint_security", "Cannot query token identity");
+    PSID sid = nullptr;
+    if (kind == TokenUser) sid = reinterpret_cast<TOKEN_USER*>(bytes.data())->User.Sid;
+    else {
+        auto groups = reinterpret_cast<TOKEN_GROUPS*>(bytes.data());
+        if (groups->GroupCount != 1) throw Error("endpoint_security", "Missing logon identity");
+        sid = groups->Groups[0].Sid;
+    }
+    LPWSTR text = nullptr;
+    if (!ConvertSidToStringSidW(sid, &text)) throw Error("endpoint_security", "Cannot format token identity");
+    std::wstring result(text); LocalFree(text); return result;
+}
+struct Identity { std::wstring user, logon; };
+Identity process_identity(HANDLE process) {
     Handle token;
     if (!OpenProcessToken(process, TOKEN_QUERY, &token.value)) throw Error("endpoint_security", "Cannot query process identity");
-    DWORD size = 0;
-    GetTokenInformation(token.value, TokenLogonSid, nullptr, 0, &size);
-    std::vector<BYTE> bytes(size);
-    if (!size || !GetTokenInformation(token.value, TokenLogonSid, bytes.data(), size, &size))
-        throw Error("endpoint_security", "Cannot query logon identity");
-    auto groups = reinterpret_cast<TOKEN_GROUPS*>(bytes.data());
-    LPWSTR text = nullptr;
-    if (groups->GroupCount != 1 || !ConvertSidToStringSidW(groups->Groups[0].Sid, &text))
-        throw Error("endpoint_security", "Missing logon identity");
-    std::wstring result(text); LocalFree(text); return result;
+    return {token_sid(token.value, TokenUser), token_sid(token.value, TokenLogonSid)};
 }
 std::string identifier() {
     GUID id{}; checked(CoCreateGuid(&id), "CoCreateGuid");
@@ -89,7 +98,9 @@ PipeConnection::~PipeConnection() { if (peer) CloseHandle(peer); if (acknowledge
 ReconnectServer::ReconnectServer(HWND dispatcher, UINT message, const std::filesystem::path& root)
     : dispatcher_(dispatcher), message_(message) {
     try {
-        host_id_ = identifier(); logon_sid_ = logon_sid(GetCurrentProcess());
+        host_id_ = identifier();
+        const auto identity = process_identity(GetCurrentProcess());
+        user_sid_ = identity.user; logon_sid_ = identity.logon;
         pipe_name_ = L"\\\\.\\pipe\\DistinctBrowser-" + winrt::to_hstring(host_id_);
         BYTE random[32]{};
         if (BCryptGenRandom(nullptr, random, sizeof(random), BCRYPT_USE_SYSTEM_PREFERRED_RNG) < 0)
@@ -97,7 +108,9 @@ ReconnectServer::ReconnectServer(HWND dispatcher, UINT message, const std::files
         credential_ = base64(random, sizeof(random));
         // Clients can read/write data and attributes, never create another
         // server instance. Keep this first server handle for the entire host.
-        Security pipe_security(logon_sid_, L"0x0012018b");
+        // Secondary logon can preserve a caller's logon SID for a different
+        // account. Kernel object access must be scoped to TokenUser instead.
+        Security pipe_security(user_sid_, L"0x0012018b");
         pipe_ = CreateNamedPipeW(pipe_name_.c_str(), PIPE_ACCESS_DUPLEX | FILE_FLAG_OVERLAPPED | FILE_FLAG_FIRST_PIPE_INSTANCE,
             PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT | PIPE_REJECT_REMOTE_CLIENTS, 1, 65536, 65536, 0, &pipe_security.attributes);
         if (pipe_ == INVALID_HANDLE_VALUE) throw Error("endpoint_security", "Cannot reserve private pipe");
@@ -111,7 +124,7 @@ ReconnectServer::ReconnectServer(HWND dispatcher, UINT message, const std::files
         created_ = std::to_string((static_cast<uint64_t>(creation.dwHighDateTime) << 32) | creation.dwLowDateTime);
         std::filesystem::create_directories(root);
         directory_ = root / winrt::to_hstring(host_id_).c_str();
-        Security file_security(logon_sid_, L"FA");
+        Security file_security(user_sid_, L"FA");
         if (!CreateDirectoryW(directory_.c_str(), &file_security.attributes)) throw Error("endpoint_security", "Cannot create private endpoint directory");
         directory_created_ = true;
         endpoint_ = directory_ / L"endpoint.json";
@@ -121,7 +134,8 @@ ReconnectServer::ReconnectServer(HWND dispatcher, UINT message, const std::files
         auto protected_text = base64(protected_data.pbData, protected_data.cbData); LocalFree(protected_data.pbData);
         auto description = object({{L"host_id", js(host_id_)}, {L"pipe_name", js(winrt::to_string(pipe_name_))},
             {L"pid", jn(GetCurrentProcessId())}, {L"process_created", js(created_)}, {L"executable", js(executable_)},
-            {L"protocol_version", jn(1)}, {L"credential_dpapi", js(protected_text)}});
+            {L"protocol_version", jn(1)}, {L"credential_dpapi", js(protected_text)},
+            {L"user_sid", js(winrt::to_string(user_sid_))}, {L"logon_sid", js(winrt::to_string(logon_sid_))}});
         auto bytes = winrt::to_string(description.Stringify());
         auto temporary = directory_ / L"endpoint.tmp";
         {
@@ -192,7 +206,9 @@ void ReconnectServer::run() {
             ULONG pid = 0;
             if (!GetNamedPipeClientProcessId(pipe_, &pid)) throw Error("identity_failed", "Unknown pipe client");
             connection->peer = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION | SYNCHRONIZE, FALSE, pid);
-            if (!connection->peer || logon_sid(connection->peer) != logon_sid_) throw Error("identity_failed", "Client logon does not match");
+            if (!connection->peer) throw Error("identity_failed", "Cannot query pipe client");
+            const auto identity = process_identity(connection->peer);
+            if (identity.user != user_sid_ || identity.logon != logon_sid_) throw Error("identity_failed", "Client account/logon does not match");
             std::string handshake;
             const auto deadline = GetTickCount64() + 5000;
             // No over-read: bytes following the handshake remain protocol data.

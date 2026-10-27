@@ -1,5 +1,6 @@
-param([string]$Executable = 'build/distinct-browser.exe')
+param([string]$Executable = 'build/distinct-browser.exe', [switch]$CrossUserSecurity, [switch]$Elevate)
 $ErrorActionPreference = 'Stop'
+if ($Elevate -and -not $CrossUserSecurity) { throw '-Elevate requires -CrossUserSecurity' }
 $projectRoot = Split-Path $PSScriptRoot -Parent
 Push-Location $projectRoot
 try {
@@ -28,8 +29,17 @@ try {
     if ($LASTEXITCODE) { throw 'Toolbar theme/DPI tests failed' }
     & python tests/protocol.py $Executable
     if ($LASTEXITCODE) { throw 'Protocol tests failed' }
+    & python tests/cross_user_contract.py
+    if ($LASTEXITCODE) { throw 'Cross-user evidence contract tests failed' }
     & python tests/recovery.py $Executable
     if ($LASTEXITCODE) { throw 'Session recovery tests failed' }
     & python tests/failures.py $Executable
     if ($LASTEXITCODE) { throw 'Failure tests failed' }
+    if ($CrossUserSecurity) {
+        $securityArguments = @('tests/cross_user.py', '--executable', $Executable)
+        if ($Elevate) { $securityArguments += '--elevate' }
+        & python @securityArguments
+        if ($LASTEXITCODE -eq 77) { throw 'Cross-user security was not executed; see artifacts/cross-user-security.json' }
+        if ($LASTEXITCODE) { throw 'Cross-user security or cleanup failed' }
+    }
 } finally { Pop-Location }

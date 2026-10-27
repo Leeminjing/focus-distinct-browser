@@ -79,6 +79,10 @@ try {
         if ($LASTEXITCODE) { throw 'Page lifecycle tests failed' }
         & cl.exe /nologo /std:c++17 /O2 /MT /EHsc /W4 /utf-8 /DUNICODE /D_UNICODE /DNOMINMAX /DWIN32_LEAN_AND_MEAN /Fo$OutputDirectory/ /Fe$OutputDirectory/toolbar-component.exe tests/toolbar_component.cpp src/window/native_toolbar.cpp $OutputDirectory/app.res /link /SUBSYSTEM:WINDOWS user32.lib gdi32.lib ole32.lib d2d1.lib dwrite.lib dwmapi.lib comctl32.lib advapi32.lib
         if ($LASTEXITCODE) { throw 'Toolbar component test compilation failed' }
+        & cl.exe /nologo /std:c++17 /O2 /MT /EHsc /W4 /utf-8 /DUNICODE /D_UNICODE /DNOMINMAX /DWIN32_LEAN_AND_MEAN /Fo$OutputDirectory/ /Fe$OutputDirectory/cross-user-worker.exe tests/cross_user_worker.cpp /link advapi32.lib
+        if ($LASTEXITCODE) { throw 'Cross-user probe compilation failed' }
+        & cl.exe /nologo /std:c++17 /O2 /MT /EHsc /W4 /utf-8 /DUNICODE /D_UNICODE /DNOMINMAX /DWIN32_LEAN_AND_MEAN /Fo$OutputDirectory/ /Fe$OutputDirectory/cross-user-runner.exe tests/cross_user_runner.cpp /link advapi32.lib netapi32.lib bcrypt.lib userenv.lib
+        if ($LASTEXITCODE) { throw 'Cross-user broker compilation failed' }
     }
     Write-Host "Built $projectRoot\$OutputDirectory\distinct-browser.exe"
 } finally { Pop-Location }

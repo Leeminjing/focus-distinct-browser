@@ -58,6 +58,7 @@ for library, name, args, result in [
     (A, 'GetSecurityDescriptorControl', [C.c_void_p, C.POINTER(W.WORD), C.POINTER(W.DWORD)], W.BOOL),
     (A, 'GetAce', [C.c_void_p, W.DWORD, C.POINTER(C.c_void_p)], W.BOOL),
     (A, 'EqualSid', [C.c_void_p, C.c_void_p], W.BOOL),
+    (A, 'ConvertSidToStringSidW', [C.c_void_p, C.POINTER(W.LPWSTR)], W.BOOL),
     (D, 'CryptUnprotectData', [C.POINTER(BLOB), C.c_void_p, C.c_void_p, C.c_void_p, C.c_void_p, W.DWORD, C.POINTER(BLOB)], W.BOOL),
 ]:
     fn = getattr(library, name); fn.argtypes, fn.restype = args, result
@@ -69,17 +70,29 @@ def checked(value):
     return value
 
 
-def logon():
+def token_information(kind, process=None):
     token, size = W.HANDLE(), W.DWORD()
-    checked(A.OpenProcessToken(K.GetCurrentProcess(), 8, C.byref(token)))
+    checked(A.OpenProcessToken(K.GetCurrentProcess() if process is None else process, 8, C.byref(token)))
     try:
-        A.GetTokenInformation(token, 28, None, 0, C.byref(size))  # TokenLogonSid
+        A.GetTokenInformation(token, kind, None, 0, C.byref(size))
         buffer = C.create_string_buffer(size.value)
-        checked(A.GetTokenInformation(token, 28, buffer, size, C.byref(size)))
-        assert GROUPS.from_buffer(buffer).count == 1
+        checked(A.GetTokenInformation(token, kind, buffer, size, C.byref(size)))
         return buffer
     finally:
         K.CloseHandle(token)
+
+
+def logon(process=None):
+    buffer = token_information(28, process)  # TokenLogonSid
+    assert GROUPS.from_buffer(buffer).count == 1
+    return buffer
+
+
+def sid_text(sid):
+    text = W.LPWSTR()
+    checked(A.ConvertSidToStringSidW(sid, C.byref(text)))
+    try: return text.value
+    finally: K.LocalFree(C.cast(text, C.c_void_p))
 
 
 def private_file(path, directory=False):
@@ -99,13 +112,13 @@ def private_file(path, directory=False):
         checked(A.GetSecurityDescriptorControl(descriptor, C.byref(control), C.byref(revision)))
         if not acl.value or not control.value & 0x1000:
             raise PermissionError('Endpoint must have an explicit protected DACL')
-        identity = logon()
+        identity = token_information(1)  # TokenUser, never a shared logon group.
         count = W.WORD.from_address(acl.value + 4).value
         if count != 1:
-            raise PermissionError('Endpoint must grant only this logon access')
+            raise PermissionError('Endpoint must grant only this account access')
         ace = C.c_void_p(); checked(A.GetAce(acl, 0, C.byref(ace)))
-        if C.c_ubyte.from_address(ace.value).value != 0 or not A.EqualSid(ace.value + 8, GROUPS.from_buffer(identity).groups[0].sid):
-            raise PermissionError('Endpoint belongs to a different logon')
+        if C.c_ubyte.from_address(ace.value).value != 0 or not A.EqualSid(ace.value + 8, SID_ENTRY.from_buffer(identity).sid):
+            raise PermissionError('Endpoint belongs to a different account')
         if directory:
             return None
         content, read = C.create_string_buffer(16385), W.DWORD()
@@ -126,6 +139,10 @@ class ReconnectClient:
             description = private_file(self.endpoint)
         except FileNotFoundError as error:
             raise ConnectionError('Host endpoint is unavailable; no browser was recreated') from error
+        account, session = token_information(1), logon()
+        if (description.get('user_sid') != sid_text(SID_ENTRY.from_buffer(account).sid)
+                or description.get('logon_sid') != sid_text(GROUPS.from_buffer(session).groups[0].sid)):
+            raise ConnectionError('Host account/logon does not match; legacy endpoints are not upgraded')
         if description['protocol_version'] != 1 or os.path.normcase(os.path.normpath(description['executable'])) != os.path.normcase(str(self.executable)):
             raise ConnectionError('Host executable/protocol does not match the trusted caller configuration')
         if expected_sha256 and hashlib.sha256(self.executable.read_bytes()).hexdigest() != expected_sha256:
@@ -150,6 +167,10 @@ class ReconnectClient:
                 raise ConnectionError('Original host process identity is unavailable') from error
             if str(times[0].value) != description['process_created'] or Path(image.value).resolve() != self.executable or K.WaitForSingleObject(self._peer, 0) != 258:
                 raise ConnectionError('Original host is no longer running')
+            account, session = token_information(1, self._peer), logon(self._peer)
+            if (description['user_sid'] != sid_text(SID_ENTRY.from_buffer(account).sid)
+                    or description['logon_sid'] != sid_text(GROUPS.from_buffer(session).groups[0].sid)):
+                raise ConnectionError('Host process account/logon identity does not match')
             self._pipe = K.CreateFileW(description['pipe_name'], 0x0012018b, 0, None, 3, 0x40000000, None)
             if self._pipe == INVALID:
                 self._pipe = None

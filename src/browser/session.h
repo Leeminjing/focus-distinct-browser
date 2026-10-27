@@ -63,7 +63,7 @@ struct Page : std::enable_shared_from_this<Page> {
     std::weak_ptr<Browser> browser;
     std::string id, opener_id;
     uint64_t created = GetTickCount64(), revision = 0, navigation_id = 0, selected_at = 0;
-    HWND window = nullptr, page_window = nullptr;
+    HWND window = nullptr, page_window = nullptr, last_focused_window = nullptr;
     std::unique_ptr<distinct::NativeToolbar> toolbar;
     std::shared_ptr<distinct::KeyboardTarget> keyboard;
     std::shared_ptr<PendingWindow> pending_window;

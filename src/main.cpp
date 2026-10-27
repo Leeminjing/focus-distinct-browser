@@ -196,9 +196,26 @@ LRESULT CALLBACK PageProc(HWND window, UINT message, WPARAM wparam, LPARAM lpara
         if (b->toolbar && b->toolbar->parent_message(message, wparam, lparam, result)) return result;
         switch (message) {
         case WM_ACTIVATE:
-            if (LOWORD(wparam) != WA_INACTIVE && b->ready && !b->closing)
+            if (LOWORD(wparam) == WA_INACTIVE) {
+                HWND focus = GetFocus();
+                if (focus && IsChild(window, focus)) b->last_focused_window = focus;
+            } else if (b->ready && !b->closing)
                 b->host->select(b->shared_from_this(), "window_activated");
             break;
+        case WM_SETFOCUS:
+            // DefWindowProc(WM_ACTIVATE) focuses the top-level HWND. Restore
+            // the actual input child so IME messages cannot go to that host.
+            // Native toolbar controls regain focus; the WebView
+            // restores its own DOM focus through the controller.
+            if (b->ready && !b->closing && GetActiveWindow() == window && !IsIconic(window)) {
+                HWND focus = b->last_focused_window;
+                bool page = focus && (focus == b->page_window || IsChild(b->page_window, focus));
+                if (focus && IsChild(window, focus) && IsWindowVisible(focus) && IsWindowEnabled(focus) && !page)
+                    SetFocus(focus);
+                else if (b->controller)
+                    b->controller->MoveFocus(COREWEBVIEW2_MOVE_FOCUS_REASON_PROGRAMMATIC);
+            }
+            return 0;
         case WM_SYSCOMMAND:
             if ((wparam & 0xFFF0) == SC_KEYMENU && b->keyboard && b->keyboard->suppress_key_menu.exchange(false)) {
                 return 0;

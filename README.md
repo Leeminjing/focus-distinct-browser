@@ -1,4 +1,6 @@
-# Distinct Browser · v0.6.1 Account-isolated Session Recovery
+# Distinct Browser · v0.6.2 Activation Focus Recovery
+
+v0.6.2 修复窗口重新激活时的输入焦点恢复：Alt+Tab 或其他窗口短暂置前后，网页可继续接收 IME 输入，原生工具栏也恢复原控件焦点。切换窗口不撤销租约；实际输入仍按既有规则接管。协议保持 JSONL v1。
 
 一个 Windows 11 x64 原生浏览器宿主：C++17、Win32 窗口、系统 WebView2 Runtime。每个浏览器有真实窗口、独立数据目录和控制权状态。一个进程可以代表多个逻辑调用者，通过重定向的 stdin/stdout 发送 UTF-8 JSON 行。
 
@@ -141,4 +143,4 @@ python tests/cross_user.py --elevate
 
 完整接口及当前行为边界见 [协议](docs/protocol.md)。
 
-源码提交后可用 `./scripts/package.ps1` 打包单 EXE、`SHA256SUMS.txt`、`artifact.json`，输出到 `artifacts/releases/v0.6.1/`。`-DesktopValidation`、`-KeyboardStability` 可附加与当前 EXE 摘要一致的验收报告，摘要不符会拒绝打包；不能复用旧版 EXE 的报告充当新版验收。不要分发测试用的 `toolbar-component.exe`、`lifecycle-tests.exe` 或 `cross-user-*.exe`。
+源码提交后可用 `./scripts/package.ps1` 打包单 EXE、`SHA256SUMS.txt`、`artifact.json`，输出到 `artifacts/releases/v0.6.2/`。`-DesktopValidation`、`-KeyboardStability` 可附加与当前 EXE 摘要一致的验收报告，摘要不符会拒绝打包；不能复用旧版 EXE 的报告充当新版验收。不要分发测试用的 `toolbar-component.exe`、`lifecycle-tests.exe` 或 `cross-user-*.exe`。

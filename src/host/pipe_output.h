@@ -1,6 +1,7 @@
 #pragma once
 #include <windows.h>
 #include "../json.h"
+#include "perf_trace.h"
 #include <condition_variable>
 #include <deque>
 #include <functional>
@@ -32,7 +33,11 @@ public:
         thread_.join();
     }
     void send(const Json& value) {
+        auto trace_begin = PerfTrace::now();
         auto line = winrt::to_string(value.Stringify()) + "\n";
+        if (trace_begin && value.HasKey(L"result") && value.GetNamedValue(L"result").ValueType() == JsonType::Object &&
+            value.GetNamedObject(L"result").HasKey(L"image"))
+            PerfTrace::record("response_json_utf8", trace_begin, line.size());
         std::lock_guard<std::mutex> lock(mutex_);
         if (stopped_) return;
         if (bytes_ + line.size() > 64 * 1024 * 1024) {

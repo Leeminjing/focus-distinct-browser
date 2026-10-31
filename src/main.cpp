@@ -17,6 +17,7 @@
 #include "window/keyboard_guard.h"
 #include "browser/site_interactions.h"
 #include "host/pipe_output.h"
+#include "host/perf_trace.h"
 #include <atomic>
 #include <filesystem>
 #include <functional>
@@ -408,36 +409,41 @@ void Host::initialize(const std::shared_ptr<Page>& b) {
 }
 
 static std::string base64(const BYTE* bytes, DWORD count) {
+    auto trace_begin = PerfTrace::now();
     DWORD length = 0;
     if (!CryptBinaryToStringA(bytes, count, CRYPT_STRING_BASE64 | CRYPT_STRING_NOCRLF, nullptr, &length))
         throw Error("capture_failed", "Cannot size base64 image");
     std::string text(length, '\0');
     if (!CryptBinaryToStringA(bytes, count, CRYPT_STRING_BASE64 | CRYPT_STRING_NOCRLF, text.data(), &length))
         throw Error("capture_failed", "Cannot encode image");
-    text.resize(length); return text;
+    text.resize(length); PerfTrace::record("base64_encode", trace_begin, count); return text;
 }
 void Host::observe(const std::shared_ptr<Page>& b, const std::shared_ptr<Operation>& op) {
+    auto trace_begin = PerfTrace::now();
     if (b->navigating) { finish(b, op, "page_loading", "Wait for navigation_completed and observe again"); return; }
     op->revision = b->revision;
     auto error = gate(b, op);
     if (!error.empty()) { finish(b, op, error, "Control revoked before observation"); return; }
     HRESULT hr = b->view->CallDevToolsProtocolMethod(L"Page.getLayoutMetrics", L"{}",
-        Callback<ICoreWebView2CallDevToolsProtocolMethodCompletedHandler>([this, b, op](HRESULT error, PCWSTR text) -> HRESULT {
+        Callback<ICoreWebView2CallDevToolsProtocolMethodCompletedHandler>([this, b, op, trace_begin](HRESULT error, PCWSTR text) -> HRESULT {
             if (op->done) return S_OK;
             if (FAILED(error)) { finish(b, op, "observation_failed", "Cannot read CSS viewport"); return S_OK; }
             try {
                 auto denied = gate(b, op);
                 if (!denied.empty()) { finish(b, op, denied, "Control revoked during observation"); return S_OK; }
+                PerfTrace::record("layout_metrics", trace_begin);
                 auto metrics = parse(text);
                 auto viewport = metrics.GetNamedObject(L"cssVisualViewport");
                 double width = viewport.GetNamedNumber(L"clientWidth"), height = viewport.GetNamedNumber(L"clientHeight");
                 ComPtr<IStream> stream;
                 checked(CreateStreamOnHGlobal(nullptr, TRUE, &stream), "CreateStreamOnHGlobal");
+                auto capture_begin = PerfTrace::now();
                 HRESULT result = b->view->CapturePreview(COREWEBVIEW2_CAPTURE_PREVIEW_IMAGE_FORMAT_PNG, stream.Get(),
-                    Callback<ICoreWebView2CapturePreviewCompletedHandler>([this, b, op, stream, width, height](HRESULT error) -> HRESULT {
+                    Callback<ICoreWebView2CapturePreviewCompletedHandler>([this, b, op, stream, width, height, trace_begin, capture_begin](HRESULT error) -> HRESULT {
                         if (op->done) return S_OK;
                         try {
                             checked(error, "CapturePreview");
+                            PerfTrace::record("capture_png_callback", capture_begin);
                             auto denied = gate(b, op);
                             if (!denied.empty()) { finish(b, op, denied, "Control revoked during capture"); return S_OK; }
                             if (op->revision != b->revision || op->selection_revision != b->owner()->selection_revision || b->navigating) {
@@ -459,14 +465,21 @@ void Host::observe(const std::shared_ptr<Page>& b, const std::shared_ptr<Operati
                             auto source = owned_text(url);
                             checked(b->view->get_DocumentTitle(&title), "get_DocumentTitle");
                             auto caption = owned_text(title);
-                            Json image = object({{L"mime_type", js("image/png")}, {L"base64", js(base64(bytes.data(), read))},
-                                {L"width", jn(dimension(16))}, {L"height", jn(dimension(20))}});
+                            auto image = [&] {
+                                auto encoded = base64(bytes.data(), read);
+                                auto image_begin = PerfTrace::now();
+                                auto result = object({{L"mime_type", js("image/png")}, {L"base64", js(encoded)},
+                                    {L"width", jn(dimension(16))}, {L"height", jn(dimension(20))}});
+                                PerfTrace::record("image_json_build", image_begin, read);
+                                return result;
+                            }();
                             b->viewport_width = width; b->viewport_height = height;
                             b->owner()->control.observed = true;
                             finish(b, op, "", "", object({{L"page_id", js(b->id)}, {L"url", js(source)}, {L"title", js(caption)},
                                 {L"viewport", object({{L"width", jn(width)}, {L"height", jn(height)}, {L"coordinate_space", js("css_viewport")}})},
                                 {L"image", image}, {L"state", js(mode_name(b->owner()->control.mode))},
                                 {L"site_interactions", b->owner()->sites ? b->owner()->sites->snapshot(b->id) : Json()}}));
+                            PerfTrace::record("observe_host_until_enqueued", trace_begin, read);
                         } catch (const Error& e) { finish(b, op, e.code, e.what()); }
                         catch (...) { finish(b, op, "observation_failed", "Capture or metadata failed"); }
                         return S_OK;

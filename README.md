@@ -65,6 +65,10 @@ ctest --test-dir build/cmake -C Release --output-on-failure
 
 ## 验收
 
+多浏览器并发资源与延迟测量见 [性能基线](benchmarks/README.md)。脚本使用本地页面，
+保存逐请求及原生进程树的 JSON / CSV，并在资源不足时保留部分结果、停止扩容；
+不改变 Profile 隔离、安全恢复或 Focus 接入。
+
 ```powershell
 ./scripts/build.ps1
 python tests/integration.py
